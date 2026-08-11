@@ -73,6 +73,11 @@ PluginComponent {
         _persist();
     }
 
+    // Last poll, reported by status(). Without this a herdr badge stuck at 0 is
+    // indistinguishable between "nothing is waiting", "the command failed" and
+    // "the output parsed but has a shape I did not expect" — three different bugs.
+    property var herdrLastPoll: ({ at: 0, bytes: 0, parsed: false, agents: 0, statuses: "", error: "never polled" })
+
     Process {
         id: herdrSnapshot
         command: ["herdr", "api", "snapshot"]
@@ -80,16 +85,33 @@ PluginComponent {
 
         stdout: StdioCollector {
             onStreamFinished: {
+                let poll = { at: Date.now(), bytes: text.length, parsed: false, agents: 0, statuses: "", error: "" };
                 let snapshot = null;
                 try {
                     snapshot = JSON.parse(text);
+                    poll.parsed = true;
                 } catch (e) {
-                    // herdr not running, or output that is not a snapshot. Treat as
-                    // "nothing is blocked" rather than holding stale entries — the
+                    // herdr not running, or output that is not JSON. Treat as
+                    // "nothing is waiting" rather than holding stale entries — the
                     // next successful poll restores them within seconds.
+                    poll.error = "not JSON: " + text.slice(0, 120);
+                    root.herdrLastPoll = poll;
                     root._applyHerdrBuckets({});
                     return;
                 }
+
+                const agents = (snapshot && snapshot.agents) || [];
+                poll.agents = agents.length;
+                let seen = {};
+                agents.forEach(function (a) {
+                    const s = a.agent_status || "(none)";
+                    seen[s] = (seen[s] || 0) + 1;
+                });
+                poll.statuses = Object.keys(seen).map(function (k) { return k + "=" + seen[k]; }).join(" ");
+                if (!snapshot || snapshot.agents === undefined)
+                    poll.error = "no 'agents' key; top-level keys: " + Object.keys(snapshot || {}).join(",");
+
+                root.herdrLastPoll = poll;
                 root._applyHerdrBuckets(Rules.herdrBuckets(snapshot, root.herdrStatuses));
             }
         }
@@ -150,6 +172,14 @@ PluginComponent {
                     lines.push("    " + buckets[b].count + "  " + buckets[b].name);
             }
             lines.push("lastSeen: " + new Date(root.state.lastSeenTs).toISOString());
+            if (root.herdrEnabled) {
+                const p = root.herdrLastPoll;
+                lines.push("herdr poll: " + (p.at ? new Date(p.at).toISOString() : "never") + ", " + p.bytes + " bytes, parsed=" + p.parsed + ", agents=" + p.agents);
+                lines.push("herdr statuses seen: " + (p.statuses || "(none)"));
+                lines.push("herdr watching: " + root.herdrStatuses.join(", "));
+                if (p.error)
+                    lines.push("herdr error: " + p.error);
+            }
             return lines.join("\n");
         }
 
