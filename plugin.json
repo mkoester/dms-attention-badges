@@ -1,0 +1,20 @@
+{
+    "id": "attentionBadges",
+    "name": "Attention Badges",
+    "description": "Per-app badges counting what happened since you last focused the app — new mail per Thunderbird account, agents waiting in herdr",
+    "version": "0.1.0",
+    "author": "Mirko Köster",
+    "type": "composite",
+    "capabilities": ["daemon", "dankbar-widget"],
+    "icon": "notifications_active",
+    "components": {
+        "daemon": "./AttentionDaemon.qml",
+        "widget": "./AttentionWidget.qml"
+    },
+    "settings": "./AttentionSettings.qml",
+    "requires_dms": ">=1.5.0",
+    "permissions": [
+        "settings_read",
+        "settings_write"
+    ]
+}

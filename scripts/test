@@ -1,0 +1,124 @@
+#!/usr/bin/env node
+// Unit tests for Rules.js — the parsing/state logic behind the badges.
+//
+// The fixtures below are SHAPE-FAITHFUL copies of real entries taken from
+// ~/.cache/DankMaterialShell/notification_history.json (only the mail addresses
+// were replaced, since this repo may go public). That matters: a tidy invented
+// fixture would pass whatever the regex does, and the whole risk here is that
+// Thunderbird's real wording differs from what we remember it being.
+
+const R = require("../Rules.js");
+
+let failed = 0;
+let ran = 0;
+
+function check(name, actual, expected) {
+    ran++;
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    if (a !== e) {
+        failed++;
+        console.error(`FAIL  ${name}\n        expected ${e}\n        actual   ${a}`);
+    }
+}
+
+const T = R.defaultTargets();
+const tb = T.find(t => t.id === "thunderbird");
+const herdr = T.find(t => t.id === "herdr");
+
+function notif(o) {
+    return Object.assign(
+        { appName: "", desktopEntry: "", summary: "", body: "", timestamp: 1000 },
+        o
+    );
+}
+
+// ── Thunderbird: the real notification shape ────────────────────────────────
+const mailSingle = notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "mk@example.de received 1 new message",
+    body: "Your invoice is ready from Example GmbH"
+});
+const mailPlural = notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "other@example.com received 2 new messages",
+    body: "Some subject from Some Sender"
+});
+// Real entry: Thunderbird also emits non-mail notifications on the same app id.
+const mailError = notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "Thunderbird",
+    body: "Failed to connect to server archive.mail.example.de."
+});
+
+check("tb matches its own notification", R.matches(tb, mailSingle), true);
+check("tb ignores a foreign notification", R.matches(tb, notif({ desktopEntry: "brave-browser" })), false);
+check("singular parses", R.parse(tb, mailSingle), { bucket: "mk@example.de", count: 1 });
+check("plural parses with its count", R.parse(tb, mailPlural), { bucket: "other@example.com", count: 2 });
+check("non-mail falls back, is not dropped", R.parse(tb, mailError), { bucket: "other", count: 1 });
+
+// A locale change is the most likely way this breaks. It must degrade to the
+// fallback bucket (visible) rather than to silence.
+const mailGerman = notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "mk@example.de hat 2 neue Nachrichten erhalten"
+});
+check("unparseable summary is still counted", R.parse(tb, mailGerman), { bucket: "other", count: 1 });
+
+// ── herdr: real shape, appName is plain notify-send ─────────────────────────
+const attention = notif({ appName: "notify-send", summary: "claude needs attention", body: "homelab · 3 · claude" });
+const finished = notif({ appName: "notify-send", summary: "claude finished", body: "homelab · 3 · lazygit" });
+const otherScript = notif({ appName: "notify-send", summary: "backup done", body: "nightly" });
+
+check("herdr matches 'needs attention'", R.matches(herdr, attention), true);
+check("herdr ignores 'finished'", R.matches(herdr, finished), false);
+check("herdr ignores an unrelated notify-send", R.matches(herdr, otherScript), false);
+check("herdr buckets by pane", R.parse(herdr, attention), { bucket: "homelab · 3 · claude", count: 1 });
+
+// ── Folding history ─────────────────────────────────────────────────────────
+// Newest-first, exactly as DMS stores it, with one entry already seen.
+const history = [
+    Object.assign({}, mailPlural, { timestamp: 5000 }),
+    Object.assign({}, attention, { timestamp: 4000 }),
+    Object.assign({}, mailSingle, { timestamp: 3000 }),
+    Object.assign({}, mailSingle, { timestamp: 1000 })
+];
+
+let s = R.applyHistory({ lastSeenTs: 2000, targets: {} }, T, history);
+check("counts only entries newer than lastSeenTs", R.totalFor(s, "thunderbird"), 3);
+check("lastSeenTs advances to the newest entry", s.lastSeenTs, 5000);
+check("per-account buckets", R.bucketList(s, "thunderbird"), [
+    { name: "other@example.com", count: 2 },
+    { name: "mk@example.de", count: 1 }
+]);
+check("herdr counted independently", R.totalFor(s, "herdr"), 1);
+
+// Re-folding the same history must be a no-op — the daemon re-reads historyList
+// on every change, including dismissals and prunes.
+const again = R.applyHistory(s, T, history);
+check("re-folding the same history changes nothing", again, s);
+
+// applyHistory must not mutate its input.
+const before = { lastSeenTs: 0, targets: {} };
+R.applyHistory(before, T, history);
+check("input state is not mutated", before, { lastSeenTs: 0, targets: {} });
+
+// ── Resets ──────────────────────────────────────────────────────────────────
+check("focusing thunderbird clears only it", R.totalFor(R.clearTarget(s, "thunderbird"), "thunderbird"), 0);
+check("...and leaves herdr alone", R.totalFor(R.clearTarget(s, "thunderbird"), "herdr"), 1);
+check("clearing one bucket leaves the rest", R.totalFor(R.clearBucket(s, "thunderbird", "other@example.com"), "thunderbird"), 1);
+check("clearing the last bucket drops the target", R.clearBucket(s, "herdr", "homelab · 3 · claude").targets.herdr, undefined);
+check("a cleared target reports zero, not NaN", R.totalFor(R.emptyState(), "thunderbird"), 0);
+
+// ── Window-class lookup (the focus side) ────────────────────────────────────
+check("window class maps to its target", R.targetForWindowClass(T, "org.mozilla.Thunderbird").id, "thunderbird");
+check("matching is case-insensitive", R.targetForWindowClass(T, "ORG.MOZILLA.THUNDERBIRD").id, "thunderbird");
+check("an unwatched class matches nothing", R.targetForWindowClass(T, "firefox"), null);
+check("an empty class matches nothing", R.targetForWindowClass(T, ""), null);
+
+console.log(`${ran - failed}/${ran} assertions passed`);
+process.exit(failed === 0 ? 0 : 1);
