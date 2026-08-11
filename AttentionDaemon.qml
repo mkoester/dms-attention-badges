@@ -83,7 +83,10 @@ PluginComponent {
         target: "attentionBadges"
 
         function status(): string {
-            let lines = [];
+            // The focused class is the whole reset mechanism, and a wrong one fails
+            // silently — report it rather than making the next person guess.
+            const appId = ToplevelManager.activeToplevel?.appId ?? "";
+            let lines = ["focused: " + (appId || "(none)")];
             for (let i = 0; i < root.targets.length; i++) {
                 const t = root.targets[i];
                 const buckets = Rules.bucketList(root.state, t.id);
