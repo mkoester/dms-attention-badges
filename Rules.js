@@ -158,13 +158,21 @@ function setTargetBuckets(state, targetId, buckets) {
     return { lastSeenTs: state.lastSeenTs, targets: targets };
 }
 
-// A herdr session snapshot (`herdr api snapshot`) -> buckets.
+// The agent statuses, from the bundled API schema (`herdr api schema --json`):
+// idle / working / blocked / done / unknown. Two of them want you:
 //
-// "Needs attention" is agent_status === "blocked". The agent statuses are
-// idle/working/blocked/done/unknown, from the bundled API schema — `done` is a
-// finished run, which is information but not a request for input, so it does not
-// badge. The focused pane is excluded: you are looking at it right now.
-function herdrBuckets(snapshot) {
+//   blocked — waiting for your input
+//   done    — finished, waiting for your review
+//
+// Marked distinctly because they are different jobs, using the same visual
+// language herdr's own sidebar uses (a dot for blocked, a check for done).
+var HERDR_ATTENTION = ["blocked", "done"];
+var HERDR_MARKS = { blocked: "●", done: "✓" };
+
+// A herdr session snapshot (`herdr api snapshot`) -> buckets.
+// The focused pane is excluded: you are looking at it right now.
+function herdrBuckets(snapshot, statuses) {
+    const wanted = statuses && statuses.length ? statuses : HERDR_ATTENTION;
     const agents = (snapshot && snapshot.agents) || [];
     const focusedPane = snapshot ? snapshot.focused_pane_id : null;
 
@@ -179,7 +187,7 @@ function herdrBuckets(snapshot) {
 
     let buckets = {};
     agents.forEach(function (a) {
-        if (a.agent_status !== "blocked")
+        if (wanted.indexOf(a.agent_status) === -1)
             return;
         if (focusedPane && a.pane_id === focusedPane)
             return;
@@ -190,7 +198,8 @@ function herdrBuckets(snapshot) {
             tabNumbers[a.tab_id],
             a.display_agent || a.agent || "agent"
         ].filter(function (p) { return p !== undefined && p !== null && p !== ""; });
-        const name = parts.join(" · ");
+        const mark = HERDR_MARKS[a.agent_status] || "•";
+        const name = mark + " " + parts.join(" · ");
         buckets[name] = (buckets[name] || 0) + 1;
     });
     return buckets;
@@ -242,6 +251,7 @@ if (typeof module !== "undefined" && module.exports) {
         applyHistory: applyHistory,
         setTargetBuckets: setTargetBuckets,
         herdrBuckets: herdrBuckets,
+        HERDR_ATTENTION: HERDR_ATTENTION,
         clearTarget: clearTarget,
         clearBucket: clearBucket,
         totalFor: totalFor,

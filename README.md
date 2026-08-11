@@ -48,14 +48,24 @@ an agent blocks, no focus change ever happens, so a counter only grows; clearing
 instead would pin it at zero. Window focus simply cannot express *"I dealt with that pane"*.
 
 So herdr is polled from its own API (`herdr api snapshot`) and the badge is the **current
-set of panes whose `agent_status` is `blocked`**, minus the pane you are focused on. It
-cannot drift, because nothing accumulates: a pane leaves the badge when its agent stops
-waiting — i.e. when you reply. `done` does not badge; a finished run is information, not a
-request for input.
+set of panes whose agent wants you**, minus the pane you are focused on. It cannot drift,
+because nothing accumulates: a pane leaves the badge when its agent stops waiting.
+
+Two of the five statuses count, and they are marked apart because they are different jobs:
+
+| status | means | mark |
+|---|---|---|
+| `blocked` | waiting for your input | `●` |
+| `done` | finished, waiting for your review | `✓` |
+
+`idle`, `working` and `unknown` never badge. Finished agents can be excluded with the
+**Badge finished agents too** toggle.
 
 The status vocabulary (`idle` / `working` / `blocked` / `done` / `unknown`) and every field
 name come from `herdr api schema --json`, which is bundled in the binary and prints without
-a running server.
+a running server. Note the agent-detection scripts embedded in herdr only know
+`working`/`blocked`/`idle`, so `done` is derived by herdr itself — and it appears to leave
+that state once you look at the pane, which is exactly what a state badge wants.
 
 Anything a **counted** app notifies about that does not parse lands in a **fallback bucket**
 (`other`) rather than being dropped. That is deliberate: the parse is a locale-dependent

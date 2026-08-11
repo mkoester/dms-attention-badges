@@ -62,6 +62,8 @@ PluginComponent {
         return t.provider === "herdr";
     })
     readonly property int herdrPollSeconds: pluginData.herdrPollSeconds || 3
+    // blocked = waiting for input, done = waiting for review. Both are your turn.
+    readonly property var herdrStatuses: pluginData.herdrIncludeDone === false ? ["blocked"] : ["blocked", "done"]
 
     function _applyHerdrBuckets(buckets) {
         const next = Rules.setTargetBuckets(state, "herdr", buckets);
@@ -88,7 +90,7 @@ PluginComponent {
                     root._applyHerdrBuckets({});
                     return;
                 }
-                root._applyHerdrBuckets(Rules.herdrBuckets(snapshot));
+                root._applyHerdrBuckets(Rules.herdrBuckets(snapshot, root.herdrStatuses));
             }
         }
     }

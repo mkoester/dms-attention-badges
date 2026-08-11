@@ -29,6 +29,13 @@ PluginSettings {
         defaultValue: true
     }
 
+    ToggleSetting {
+        settingKey: "herdrIncludeDone"
+        label: "Badge finished agents too"
+        description: "Off badges only blocked panes (waiting for input). On also badges done ones (waiting for review), marked ✓ instead of ●."
+        defaultValue: true
+    }
+
     SliderSetting {
         settingKey: "herdrPollSeconds"
         label: "herdr poll interval"

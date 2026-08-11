@@ -103,17 +103,28 @@ const snapshot = {
 };
 
 const hb = R.herdrBuckets(snapshot);
-check("only blocked agents badge", Object.keys(hb).sort(), ["extensions · 4 · codex", "homelab · 3 · claude"]);
-check("the focused pane is excluded", hb["homelab · 9 · claude"], undefined);
-check("'done' does not badge", Object.keys(hb).length, 2);
-check("labels match herdr's own notification shape", hb["homelab · 3 · claude"], 1);
-check("falls back to agent when display_agent is absent", hb["extensions · 4 · codex"], 1);
+check("blocked and done both badge, marked apart", Object.keys(hb).sort(), [
+    "● extensions · 4 · codex",
+    "● homelab · 3 · claude",
+    "✓ homelab · 3 · claude"
+]);
+check("the focused pane is excluded", hb["● homelab · 9 · claude"], undefined);
+check("'working' does not badge", Object.keys(hb).length, 3);
+check("labels match herdr's own notification shape", hb["● homelab · 3 · claude"], 1);
+check("falls back to agent when display_agent is absent", hb["● extensions · 4 · codex"], 1);
 check("an empty snapshot yields nothing", R.herdrBuckets({ agents: [] }), {});
 check("a missing snapshot does not throw", R.herdrBuckets(null), {});
 
+// The watched statuses are configurable — blocked-only must still work, and must
+// differ from the default, or the setting would be untestable.
+const blockedOnly = R.herdrBuckets(snapshot, ["blocked"]);
+check("blocked-only drops the done entry", Object.keys(blockedOnly).length, 2);
+check("...and keeps the blocked ones", blockedOnly["● homelab · 3 · claude"], 1);
+check("an empty status list falls back to the default", Object.keys(R.herdrBuckets(snapshot, [])).length, 3);
+
 // State mode replaces rather than accumulates — this is the whole point.
 let st = R.setTargetBuckets(R.emptyState(), "herdr", hb);
-check("state buckets are set", R.totalFor(st, "herdr"), 2);
+check("state buckets are set", R.totalFor(st, "herdr"), 3);
 st = R.setTargetBuckets(st, "herdr", { "homelab · 3 · claude": 1 });
 check("a later poll REPLACES, never adds", R.totalFor(st, "herdr"), 1);
 st = R.setTargetBuckets(st, "herdr", {});
