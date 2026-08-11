@@ -152,10 +152,10 @@ only by loading it in a running shell.
   `{"id":…,"result":{"snapshot":{…}}}`. Both forms are accepted. This is the one thing the
   bundled schema could not tell us, and getting it wrong produced a parser that succeeded
   on every poll and found zero agents forever.
-- **`done` may be too short-lived to badge.** herdr appears to move a pane out of it as
-  soon as you look, and one captured snapshot showed a just-finished, just-viewed run
-  already back at `idle`. `dms ipc call attentionBadges status` prints a histogram of the
-  statuses actually seen, which is the way to check.
+- **`done` clears when you view the pane** — confirmed 2026-08-11 by watching the status
+  histogram across a finishing run: `idle=2 done=1` with a `✓` bucket while away, back to
+  `idle=3` and an empty badge once the pane was opened. That is herdr's own behaviour, not
+  anything this plugin does, and it is why the review queue needs no acknowledgement step.
 - **Do-not-disturb is untested**: whether suppressed notifications still reach the history
   is unverified, and if they do not, a DND window is invisible to the counter.
 

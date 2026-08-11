@@ -91,10 +91,12 @@ diagnostic named the cause in one command after three rounds of ranked guessing.
   shape. None appeared in the 50-entry sample.
 - The **widget** has never been observed rendering — as of the first session it was loaded
   and the daemon was confirmed counting via IPC, but the bar half is untested.
-- **`done` may be short-lived.** In the one live snapshot captured so far, a run that had
-  just finished *and been looked at* reported `agent_status: "idle"`. Whether `done` is
-  observable for long enough to badge, or whether herdr leaves it the moment the pane is
-  seen, is unmeasured — `herdr statuses seen:` in `status()` is the way to find out.
+- ~~Whether `done` is observable long enough to badge~~ — **settled 2026-08-11, it is.**
+  A finishing run showed `idle=2 done=1` with a `✓` bucket while the pane was unfocused,
+  and returned to `idle=3` with an empty badge once opened. So `done` persists until you
+  look, and viewing is what ends it. The earlier "probably too short-lived" reading came
+  from a single snapshot taken *after* the pane had already been viewed — an absence
+  measured at the one moment it was guaranteed to be absent.
 - **The `mk.herdr` window class is still unconfirmed** on a live window. It no longer
   affects herdr (a state target needs no focus reset) but it is the model for how
   Thunderbird's reset works, and `status()` now prints the focused class so it is one call
