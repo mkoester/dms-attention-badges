@@ -71,6 +71,18 @@ so `SessionSnapshot`, `AgentInfo` and the `AgentStatus` enum
 touching anything herdr-shaped; `herdr agent list` and `herdr api snapshot` both need the
 socket and are therefore blocked in the sandbox.
 
+**But the schema describes the payload, NOT the CLI's framing — and that cost a full
+round of testing (2026-08-11).** `herdr api snapshot` prints the socket *response
+envelope*: `{"id":"cli:api:snapshot","result":{"snapshot":{ … }}}`. Reading `.agents` off
+the top level therefore succeeded at every step — the command ran, the JSON parsed, no
+error was raised anywhere — and simply found zero agents forever. The badge sat at 0,
+which is also what "nothing is waiting" looks like, so three polls' worth of evidence said
+nothing. **A schema is authoritative for the shape of a message and says nothing about how
+a CLI wraps it**; capture one real line of output before writing a parser, and when a
+value cannot be captured, make the code report what it *did* see (`herdr poll: … bytes,
+parsed=…, agents=…`, plus a histogram of the statuses) rather than only its verdict. That
+diagnostic named the cause in one command after three rounds of ranked guessing.
+
 ## Unverified / open
 
 - Whether **do-not-disturb** suppresses entries from reaching `historyList`. If it does, a
@@ -79,10 +91,10 @@ socket and are therefore blocked in the sandbox.
   shape. None appeared in the 50-entry sample.
 - The **widget** has never been observed rendering — as of the first session it was loaded
   and the daemon was confirmed counting via IPC, but the bar half is untested.
-- **No live `herdr api snapshot` output has ever been seen** (the socket is blocked in the
-  sandbox). The parsing is written against the bundled schema, which fixes the field names
-  but not, for instance, whether the CLI wraps the snapshot in an envelope. First check if
-  the herdr badge stays empty: `herdr api snapshot | head -c 400`.
+- **`done` may be short-lived.** In the one live snapshot captured so far, a run that had
+  just finished *and been looked at* reported `agent_status: "idle"`. Whether `done` is
+  observable for long enough to badge, or whether herdr leaves it the moment the pane is
+  seen, is unmeasured — `herdr statuses seen:` in `status()` is the way to find out.
 - **The `mk.herdr` window class is still unconfirmed** on a live window. It no longer
   affects herdr (a state target needs no focus reset) but it is the model for how
   Thunderbird's reset works, and `status()` now prints the focused class so it is one call

@@ -169,10 +169,35 @@ function setTargetBuckets(state, targetId, buckets) {
 var HERDR_ATTENTION = ["blocked", "done"];
 var HERDR_MARKS = { blocked: "●", done: "✓" };
 
+// `herdr api snapshot` does NOT print a bare SessionSnapshot — it prints the
+// socket response envelope around it:
+//
+//   {"id":"cli:api:snapshot","result":{"snapshot":{ …SessionSnapshot… }}}
+//
+// Measured 2026-08-11. The bundled schema describes the snapshot, not the CLI's
+// framing, so writing against the schema alone produced a parser that succeeded
+// on every poll and found zero agents forever. Accept the bare form too, so a
+// future CLI change in either direction keeps working.
+function unwrapSnapshot(payload) {
+    if (!payload || typeof payload !== "object")
+        return null;
+    if (payload.agents !== undefined)
+        return payload;
+    const result = payload.result;
+    if (result && typeof result === "object") {
+        if (result.snapshot && result.snapshot.agents !== undefined)
+            return result.snapshot;
+        if (result.agents !== undefined)
+            return result;
+    }
+    return null;
+}
+
 // A herdr session snapshot (`herdr api snapshot`) -> buckets.
 // The focused pane is excluded: you are looking at it right now.
-function herdrBuckets(snapshot, statuses) {
+function herdrBuckets(payload, statuses) {
     const wanted = statuses && statuses.length ? statuses : HERDR_ATTENTION;
+    const snapshot = unwrapSnapshot(payload);
     const agents = (snapshot && snapshot.agents) || [];
     const focusedPane = snapshot ? snapshot.focused_pane_id : null;
 
@@ -251,6 +276,7 @@ if (typeof module !== "undefined" && module.exports) {
         applyHistory: applyHistory,
         setTargetBuckets: setTargetBuckets,
         herdrBuckets: herdrBuckets,
+        unwrapSnapshot: unwrapSnapshot,
         HERDR_ATTENTION: HERDR_ATTENTION,
         clearTarget: clearTarget,
         clearBucket: clearBucket,

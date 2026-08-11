@@ -148,9 +148,14 @@ only by loading it in a running shell.
 - **If `herdr api snapshot` fails, the herdr badge clears** rather than holding stale
   entries. herdr not running does mean nothing is waiting; a transient failure blanks it
   for one tick.
-- **The herdr snapshot parsing has never seen a live snapshot.** Field names and the status
-  vocabulary come from the bundled schema, which is authoritative for *shape* — but no
-  captured output was ever compared against it.
+- **`herdr api snapshot` prints the socket response envelope**, not a bare snapshot:
+  `{"id":…,"result":{"snapshot":{…}}}`. Both forms are accepted. This is the one thing the
+  bundled schema could not tell us, and getting it wrong produced a parser that succeeded
+  on every poll and found zero agents forever.
+- **`done` may be too short-lived to badge.** herdr appears to move a pane out of it as
+  soon as you look, and one captured snapshot showed a just-finished, just-viewed run
+  already back at `idle`. `dms ipc call attentionBadges status` prints a histogram of the
+  statuses actually seen, which is the way to check.
 - **Do-not-disturb is untested**: whether suppressed notifications still reach the history
   is unverified, and if they do not, a DND window is invisible to the counter.
 

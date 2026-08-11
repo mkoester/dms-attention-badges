@@ -100,7 +100,8 @@ PluginComponent {
                     return;
                 }
 
-                const agents = (snapshot && snapshot.agents) || [];
+                const inner = Rules.unwrapSnapshot(snapshot);
+                const agents = (inner && inner.agents) || [];
                 poll.agents = agents.length;
                 let seen = {};
                 agents.forEach(function (a) {
@@ -108,8 +109,8 @@ PluginComponent {
                     seen[s] = (seen[s] || 0) + 1;
                 });
                 poll.statuses = Object.keys(seen).map(function (k) { return k + "=" + seen[k]; }).join(" ");
-                if (!snapshot || snapshot.agents === undefined)
-                    poll.error = "no 'agents' key; top-level keys: " + Object.keys(snapshot || {}).join(",");
+                if (!inner)
+                    poll.error = "no snapshot found; top-level keys: " + Object.keys(snapshot || {}).join(",");
 
                 root.herdrLastPoll = poll;
                 root._applyHerdrBuckets(Rules.herdrBuckets(snapshot, root.herdrStatuses));

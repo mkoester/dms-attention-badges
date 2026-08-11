@@ -102,6 +102,18 @@ const snapshot = {
     ]
 };
 
+// MEASURED 2026-08-11: `herdr api snapshot` prints the socket response envelope,
+// not a bare SessionSnapshot. Writing against the schema alone gave a parser that
+// parsed cleanly and found zero agents on every poll — the badge sat at 0 and
+// nothing anywhere reported an error. This is the regression test for that.
+const enveloped = { id: "cli:api:snapshot", result: { snapshot: snapshot } };
+check("the CLI envelope is unwrapped", R.unwrapSnapshot(enveloped), snapshot);
+check("a bare snapshot still works", R.unwrapSnapshot(snapshot), snapshot);
+check("a result without the snapshot wrapper works", R.unwrapSnapshot({ result: snapshot }), snapshot);
+check("an unrecognisable payload is null, not a silent empty", R.unwrapSnapshot({ id: "x", result: {} }), null);
+check("enveloped input produces the same buckets as bare", R.herdrBuckets(enveloped), R.herdrBuckets(snapshot));
+check("enveloped input is not empty", Object.keys(R.herdrBuckets(enveloped)).length, 3);
+
 const hb = R.herdrBuckets(snapshot);
 check("blocked and done both badge, marked apart", Object.keys(hb).sort(), [
     "● extensions · 4 · codex",
