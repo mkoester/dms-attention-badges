@@ -83,14 +83,36 @@ value cannot be captured, make the code report what it *did* see (`herdr poll: �
 parsed=…, agents=…`, plus a histogram of the statuses) rather than only its verdict. That
 diagnostic named the cause in one command after three rounds of ranked guessing.
 
+## The Thunderbird bridge is a RESET provider, not a full one
+
+Originally scoped as "the extension owns per-account counts and resets". It shipped much
+smaller: the notification counts were already accurate, so duplicating them in the
+extension would have created a second source of truth for the same number. The extension
+sends **only the thing the desktop cannot see** — which account you opened.
+
+Consequences to keep in mind when changing either side:
+
+- `state.visitsSeen` is the plugin's memory of which visits it already acted on. **Every
+  state helper must preserve keys it does not own** (they use `Object.assign({}, state, …)`
+  for this) — an earlier version rebuilt the state object from `{lastSeenTs, targets}` and
+  would have silently dropped `visitsSeen` on the next notification, making each file read
+  look new and re-clearing a bucket that had just counted mail.
+- **The file existing is the switch**, not a setting. No file ⇒ the old focus-clears-
+  everything behaviour, which is what makes the bridge safe to uninstall. Older than 7 days
+  ⇒ treated as abandoned.
+- The bridge reports **every identity of the visited account**, because mail arrives at
+  aliases and buckets are keyed by whatever address the notification named.
+
 ## Unverified / open
 
 - Whether **do-not-disturb** suppresses entries from reaching `historyList`. If it does, a
   DND window is invisible to the counter.
 - Whether Thunderbird's **calendar reminders** use the same app id and a third summary
   shape. None appeared in the 50-entry sample.
-- The **widget** has never been observed rendering — as of the first session it was loaded
-  and the daemon was confirmed counting via IPC, but the bar half is untested.
+- ~~The widget has never been observed rendering~~ — **confirmed working 2026-08-11.**
+  Both halves of the plugin are now verified end to end on `mkDell`: Thunderbird counting
+  per account and clearing on focus, herdr badging `●`/`✓` and clearing itself, and the bar
+  widget rendering both.
 - ~~Whether `done` is observable long enough to badge~~ — **settled 2026-08-11, it is.**
   A finishing run showed `idle=2 done=1` with a `✓` bucket while the pane was unfocused,
   and returned to `idle=3` with an empty badge once opened. So `done` persists until you

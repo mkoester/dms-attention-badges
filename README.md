@@ -115,6 +115,28 @@ The window classes the reset depends on must be read off a **live window**, neve
 hyprctl -j clients | grep -i class
 ```
 
+## Optional: per-account clearing for Thunderbird
+
+Install [thunderbird-attention-bridge](https://github.com/mkoester/thunderbird-attention-bridge)
+and focusing Thunderbird stops clearing everything — only the accounts whose folders you
+actually opened clear.
+
+It works by writing
+`$XDG_STATE_HOME/thunderbird-attention-bridge/visits.json`, which this plugin watches:
+
+```json
+{"version": 1, "updatedAt": 1754923200000, "visits": {"mk@example.de": 1754923100000}}
+```
+
+**The file existing is the switch.** No file — the normal case — and the focus reset behaves
+exactly as it always did, so the bridge is purely additive and can be removed at any time. A
+file older than 7 days counts as abandoned and the fallback returns, so an uninstalled
+extension cannot leave a dead file in charge of the reset.
+
+Counting is unaffected either way: the counts still come from Thunderbird's notifications,
+and the bridge only supplies the reset. `dms ipc call attentionBadges status` says which
+mode is in force.
+
 ## Tests
 
 ```sh
@@ -136,10 +158,8 @@ only by loading it in a running shell.
 
 - **The Thunderbird parse is a localized UI string.** A locale change breaks it silently
   except for everything landing in `other`.
-- **Focus resets a whole app.** Hyprland reports that Thunderbird got focus, not which
-  account you looked at. Per-account clearing needs
-  [thunderbird-attention-bridge](https://github.com/mkoester/thunderbird-attention-bridge),
-  which reports folder navigation from inside Thunderbird.
+- **Focus resets a whole app** unless the bridge is installed — see below. Hyprland reports
+  that Thunderbird got focus, not which account you looked at.
 - **The herdr provider polls; it does not subscribe.** herdr's socket API has an event
   stream (`events.subscribe` → `pane.agent_status_changed`) which would be lower-latency,
   but a poll is stateless and self-healing: a herdr restart, a dropped connection or a
@@ -167,4 +187,8 @@ The two inputs above are one **provider**. The model is provider-agnostic on pur
 |---|---|---|---|
 | `notifications` (done) | DMS notification history | regex over summary/body | window focus |
 | `herdr` (done) | `herdr api snapshot` poll | pane | none needed — it is state |
-| `thunderbird` | native host ← Thunderbird extension | account | folder navigation |
+| `thunderbird` (done) | notifications, plus the bridge for resets | account | folder navigation |
+
+The Thunderbird one landed as a *reset* provider rather than a full one, which is smaller
+than originally scoped: the notification counts were already accurate, so the extension only
+supplies the thing the desktop cannot see.

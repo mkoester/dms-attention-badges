@@ -180,6 +180,63 @@ check("clearing one bucket leaves the rest", R.totalFor(R.clearBucket(s, "thunde
 check("clearing the last bucket drops the target", R.clearBucket(s, "herdr", "homelab · 3 · claude").targets.herdr, undefined);
 check("a cleared target reports zero, not NaN", R.totalFor(R.emptyState(), "thunderbird"), 0);
 
+// ── Thunderbird bridge: per-account clearing ────────────────────────────────
+// Without the bridge, focusing Thunderbird clears every account (clearTarget).
+// With it, only the accounts you actually opened clear.
+const now = Date.now();
+let bs = R.emptyState();
+bs = R.applyHistory(bs, T, [
+    Object.assign({}, mailSingle, { timestamp: 100 }),   // mk@example.de
+    Object.assign({}, mailPlural, { timestamp: 200 })    // other@example.com
+]);
+check("two accounts pending before any visit", R.totalFor(bs, "thunderbird"), 3);
+
+const visited = { version: 1, updatedAt: now, visits: { "mk@example.de": now } };
+check("a fresh bridge file is live", R.bridgeIsLive(visited, now), true);
+check("no file is not live", R.bridgeIsLive(null, now), false);
+check("a file with no visits key is not live", R.bridgeIsLive({ updatedAt: now }, now), false);
+check("an abandoned file stops being live", R.bridgeIsLive(visited, now + 8 * 24 * 3600 * 1000), false);
+
+bs = R.applyVisits(bs, "thunderbird", visited);
+check("the visited account clears", R.bucketList(bs, "thunderbird"), [{ name: "other@example.com", count: 2 }]);
+
+// Re-reading the same file must not re-clear: the file is re-read on every write
+// and once at startup, and mail arriving after a visit has to survive that.
+bs = R.applyEntry(bs, T, notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "mk@example.de received 1 new message",
+    timestamp: 300
+}));
+check("new mail for a visited account counts again", R.totalFor(bs, "thunderbird"), 3);
+bs = R.applyVisits(bs, "thunderbird", visited);
+check("re-reading an unchanged visit does not re-clear", R.totalFor(bs, "thunderbird"), 3);
+
+// A later visit does clear it.
+bs = R.applyVisits(bs, "thunderbird", { version: 1, updatedAt: now + 1000, visits: { "mk@example.de": now + 1000 } });
+check("a NEWER visit clears again", R.bucketList(bs, "thunderbird"), [{ name: "other@example.com", count: 2 }]);
+
+// Thunderbird spells addresses as it likes; the extension lowercases.
+let cs = R.applyEntry(R.emptyState(), T, notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "MK@Example.de received 1 new message",
+    timestamp: 400
+}));
+cs = R.applyVisits(cs, "thunderbird", { version: 1, updatedAt: now, visits: { "mk@example.de": now } });
+check("address matching is case-insensitive", R.totalFor(cs, "thunderbird"), 0);
+
+// visitsSeen must survive ordinary counting, or every notification would make
+// the next file read look new and re-clear a bucket that just counted mail.
+const carried = R.applyEntry(bs, T, notif({
+    appName: "Thunderbird",
+    desktopEntry: "org.mozilla.Thunderbird",
+    summary: "third@example.com received 1 new message",
+    timestamp: 500
+}));
+check("visitsSeen survives counting", carried.visitsSeen["mk@example.de"], now + 1000);
+check("...and survives a focus clear", R.clearTarget(carried, "thunderbird").visitsSeen["mk@example.de"], now + 1000);
+
 // ── Window-class lookup (the focus side) ────────────────────────────────────
 check("window class maps to its target", R.targetForWindowClass(T, "org.mozilla.Thunderbird").id, "thunderbird");
 check("matching is case-insensitive", R.targetForWindowClass(T, "ORG.MOZILLA.THUNDERBIRD").id, "thunderbird");

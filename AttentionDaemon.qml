@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -52,6 +53,41 @@ PluginComponent {
     function clearAll() {
         state = { lastSeenTs: state.lastSeenTs, targets: {} };
         _persist();
+    }
+
+    // ── Thunderbird bridge ──────────────────────────────────────────────────
+    // Optional. Without it, focusing Thunderbird clears every account, which is
+    // the only thing the compositor makes possible. With it, the extension says
+    // which account you opened and only that one clears.
+    property bool bridgeLive: false
+
+    FileView {
+        id: bridgeFile
+        path: StandardPaths.writableLocation(StandardPaths.GenericStateLocation) + "/thunderbird-attention-bridge/visits.json"
+        watchChanges: true
+        blockLoading: false
+
+        onLoaded: {
+            let payload = null;
+            try {
+                payload = JSON.parse(text());
+            } catch (e) {
+                root.bridgeLive = false;
+                return;
+            }
+            root.bridgeLive = Rules.bridgeIsLive(payload, Date.now());
+            if (!root.bridgeLive)
+                return;
+            const next = Rules.applyVisits(root.state, "thunderbird", payload);
+            if (JSON.stringify(next) === JSON.stringify(root.state))
+                return;
+            root.state = next;
+            root._persist();
+        }
+
+        // No file at all is the normal case for someone who never installed the
+        // extension — not an error, and the reason the fallback exists.
+        onLoadFailed: error => root.bridgeLive = false
     }
 
     // ── herdr provider ──────────────────────────────────────────────────────
@@ -132,10 +168,17 @@ PluginComponent {
     function _checkFocus() {
         const appId = ToplevelManager.activeToplevel?.appId ?? "";
         const target = Rules.targetForWindowClass(targets, appId);
+        if (!target)
+            return;
         // A state target owns its own contents; clearing it here would only be
         // undone by the next poll a moment later, which reads as a flicker.
-        if (target && target.mode !== "state")
-            clearTarget(target.id);
+        if (target.mode === "state")
+            return;
+        // When the bridge is live it reports which account you opened, so a
+        // blanket clear here would throw away exactly the precision it adds.
+        if (target.id === "thunderbird" && bridgeLive)
+            return;
+        clearTarget(target.id);
     }
 
     Connections {
@@ -167,7 +210,7 @@ PluginComponent {
             for (let i = 0; i < root.targets.length; i++) {
                 const t = root.targets[i];
                 const buckets = Rules.bucketList(root.state, t.id);
-                const how = t.mode === "state" ? "state via " + t.provider : "counted, clears on focus of " + t.windowClass;
+                const how = t.mode === "state" ? "state via " + t.provider : (t.id === "thunderbird" && root.bridgeLive ? "counted, clears per account via the bridge" : "counted, clears on focus of " + t.windowClass);
                 lines.push(t.label + " [" + how + "]: " + Rules.totalFor(root.state, t.id));
                 for (let b = 0; b < buckets.length; b++)
                     lines.push("    " + buckets[b].count + "  " + buckets[b].name);

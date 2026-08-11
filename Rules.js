@@ -106,10 +106,10 @@ function parse(target, entry) {
 // Fold one notification into the state. Returns a new state; never mutates input.
 function applyEntry(state, targets, entry) {
     const ts = typeof entry.timestamp === "number" ? entry.timestamp : 0;
-    let next = {
+    let next = Object.assign({}, state, {
         lastSeenTs: Math.max(state.lastSeenTs || 0, ts),
         targets: Object.assign({}, state.targets)
-    };
+    });
 
     for (let i = 0; i < targets.length; i++) {
         const target = targets[i];
@@ -142,7 +142,7 @@ function applyHistory(state, targets, history) {
 function clearTarget(state, targetId) {
     const targets = Object.assign({}, state.targets);
     delete targets[targetId];
-    return { lastSeenTs: state.lastSeenTs, targets: targets };
+    return Object.assign({}, state, { targets: targets });
 }
 
 // Replace a target's buckets outright — how a state provider reports. Passing an
@@ -155,7 +155,7 @@ function setTargetBuckets(state, targetId, buckets) {
         delete targets[targetId];
     else
         targets[targetId] = Object.assign({}, buckets);
-    return { lastSeenTs: state.lastSeenTs, targets: targets };
+    return Object.assign({}, state, { targets: targets });
 }
 
 // The agent statuses, from the bundled API schema (`herdr api schema --json`):
@@ -230,6 +230,51 @@ function herdrBuckets(payload, statuses) {
     return buckets;
 }
 
+// ── Thunderbird bridge ──────────────────────────────────────────────────────
+// thunderbird-attention-bridge writes {version, updatedAt, visits:{address: ms}}
+// when you open a folder. Its presence is what upgrades Thunderbird from
+// "focusing the window clears every account" to "clears the account you opened".
+
+// Stale enough that the extension was probably uninstalled — fall back to focus
+// clearing rather than leaving a dead file in charge of the reset forever.
+var BRIDGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function bridgeIsLive(payload, nowMs) {
+    if (!payload || typeof payload !== "object")
+        return false;
+    if (!payload.visits || typeof payload.visits !== "object")
+        return false;
+    const updatedAt = payload.updatedAt || 0;
+    return updatedAt > 0 && (nowMs - updatedAt) < BRIDGE_MAX_AGE_MS;
+}
+
+// Clear the buckets of accounts visited since we last looked. Visits already
+// processed are remembered in state.visitsSeen, so re-reading the file — which
+// happens on every write, and once at startup — never re-clears a bucket that
+// has legitimately counted new mail since the visit.
+function applyVisits(state, targetId, payload) {
+    const visits = (payload && payload.visits) || {};
+    const seen = Object.assign({}, state.visitsSeen || {});
+    let buckets = Object.assign({}, (state.targets || {})[targetId] || {});
+    let changed = false;
+
+    Object.keys(visits).forEach(function (address) {
+        const at = visits[address] || 0;
+        if ((seen[address] || 0) >= at)
+            return;
+        seen[address] = at;
+        Object.keys(buckets).forEach(function (name) {
+            if (name.toLowerCase() === address.toLowerCase()) {
+                delete buckets[name];
+                changed = true;
+            }
+        });
+    });
+
+    const next = changed ? setTargetBuckets(state, targetId, buckets) : state;
+    return Object.assign({}, next, { visitsSeen: seen });
+}
+
 function clearBucket(state, targetId, bucketName) {
     const buckets = Object.assign({}, state.targets[targetId] || {});
     delete buckets[bucketName];
@@ -238,7 +283,7 @@ function clearBucket(state, targetId, bucketName) {
         delete targets[targetId];
     else
         targets[targetId] = buckets;
-    return { lastSeenTs: state.lastSeenTs, targets: targets };
+    return Object.assign({}, state, { targets: targets });
 }
 
 function totalFor(state, targetId) {
@@ -275,6 +320,8 @@ if (typeof module !== "undefined" && module.exports) {
         applyEntry: applyEntry,
         applyHistory: applyHistory,
         setTargetBuckets: setTargetBuckets,
+        bridgeIsLive: bridgeIsLive,
+        applyVisits: applyVisits,
         herdrBuckets: herdrBuckets,
         unwrapSnapshot: unwrapSnapshot,
         HERDR_ATTENTION: HERDR_ATTENTION,
