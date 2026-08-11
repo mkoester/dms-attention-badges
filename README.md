@@ -43,10 +43,20 @@ string match, and a broken parse should look like a visible `other: 4`, not like
 ## Install
 
 ```sh
+mkdir -p ~/.config/DankMaterialShell/plugins
+```
+
+```sh
 ln -s "$PWD" ~/.config/DankMaterialShell/plugins/attentionBadges
 ```
 
-Then enable it in DMS Settings → Plugins, and add the widget to a bar section.
+The directory does not exist on a machine that has never installed a plugin, and DMS
+points its directory watcher at it *at startup* — so if `dms plugins list` does not show
+the plugin after creating it, `dms restart`.
+
+Then enable it in Settings → Plugins, and add the widget in **Settings → DankBar →
+Widgets** (Left / Center / Right section). A plugin whose widget is greyed out there with
+*"Plugin is disabled"* is not enabled yet.
 
 ## Verify
 
