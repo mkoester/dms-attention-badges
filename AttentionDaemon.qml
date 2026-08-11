@@ -54,10 +54,62 @@ PluginComponent {
         _persist();
     }
 
+    // ── herdr provider ──────────────────────────────────────────────────────
+    // Polls rather than subscribing to the socket's event stream: a poll is
+    // stateless, so a herdr restart, a dropped connection or a missed event all
+    // heal on the next tick instead of leaving the badge silently frozen.
+    readonly property bool herdrEnabled: targets.some(function (t) {
+        return t.provider === "herdr";
+    })
+    readonly property int herdrPollSeconds: pluginData.herdrPollSeconds || 3
+
+    function _applyHerdrBuckets(buckets) {
+        const next = Rules.setTargetBuckets(state, "herdr", buckets);
+        if (JSON.stringify(next.targets.herdr) === JSON.stringify(state.targets.herdr))
+            return;
+        state = next;
+        _persist();
+    }
+
+    Process {
+        id: herdrSnapshot
+        command: ["herdr", "api", "snapshot"]
+        running: false
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let snapshot = null;
+                try {
+                    snapshot = JSON.parse(text);
+                } catch (e) {
+                    // herdr not running, or output that is not a snapshot. Treat as
+                    // "nothing is blocked" rather than holding stale entries — the
+                    // next successful poll restores them within seconds.
+                    root._applyHerdrBuckets({});
+                    return;
+                }
+                root._applyHerdrBuckets(Rules.herdrBuckets(snapshot));
+            }
+        }
+    }
+
+    Timer {
+        interval: root.herdrPollSeconds * 1000
+        repeat: true
+        running: root.herdrEnabled
+        triggeredOnStart: true
+        onTriggered: {
+            if (!herdrSnapshot.running)
+                herdrSnapshot.running = true;
+        }
+    }
+
     function _checkFocus() {
         const appId = ToplevelManager.activeToplevel?.appId ?? "";
         const target = Rules.targetForWindowClass(targets, appId);
-        if (target)
+        // A state target owns its own contents; clearing it here would only be
+        // undone by the next poll a moment later, which reads as a flicker.
+        if (target && target.mode !== "state")
             clearTarget(target.id);
     }
 
@@ -90,7 +142,8 @@ PluginComponent {
             for (let i = 0; i < root.targets.length; i++) {
                 const t = root.targets[i];
                 const buckets = Rules.bucketList(root.state, t.id);
-                lines.push(t.label + " (" + t.windowClass + "): " + Rules.totalFor(root.state, t.id));
+                const how = t.mode === "state" ? "state via " + t.provider : "counted, clears on focus of " + t.windowClass;
+                lines.push(t.label + " [" + how + "]: " + Rules.totalFor(root.state, t.id));
                 for (let b = 0; b < buckets.length; b++)
                     lines.push("    " + buckets[b].count + "  " + buckets[b].name);
             }

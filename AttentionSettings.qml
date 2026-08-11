@@ -25,8 +25,18 @@ PluginSettings {
     ToggleSetting {
         settingKey: "enable_herdr"
         label: "herdr"
-        description: "Agents reporting 'needs attention', bucketed by workspace and pane. Clears when the herdr window is focused."
+        description: "Panes whose agent is blocked, polled from herdr's own API. Needs no reset — a pane leaves the badge when its agent stops waiting, or while you are focused on it."
         defaultValue: true
+    }
+
+    SliderSetting {
+        settingKey: "herdrPollSeconds"
+        label: "herdr poll interval"
+        description: "Seconds between `herdr api snapshot` calls."
+        defaultValue: 3
+        minimum: 1
+        maximum: 30
+        unit: "s"
     }
 
     StyledText {

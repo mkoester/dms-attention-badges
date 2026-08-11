@@ -32,11 +32,32 @@ A target can split its count by a regex over the notification text:
   bucket and the count comes from the message itself. It batches a poll into one
   notification and tells you how many mails it stands for, so the badge counts *mails*,
   not popups.
-- **herdr** shells out to plain `notify-send` with no `--app-name`, so it has no app
-  identity of its own — it is matched on the summary (`… needs attention`) and bucketed by
-  the body (`<workspace> · <pane> · <program>`).
+- **herdr** does not count at all — see below.
 
-Anything a watched app notifies about that does not parse lands in a **fallback bucket**
+### Counting vs. state
+
+Two kinds of target, and the difference is load-bearing:
+
+| mode | behaviour | right for |
+|---|---|---|
+| `count` | accumulates notifications, cleared by focusing the window | Thunderbird |
+| `state` | replaced wholesale on every poll of a provider, no reset at all | herdr |
+
+Counting is wrong for an app you **sit inside**. If you are already focused on herdr when
+an agent blocks, no focus change ever happens, so a counter only grows; clearing on arrival
+instead would pin it at zero. Window focus simply cannot express *"I dealt with that pane"*.
+
+So herdr is polled from its own API (`herdr api snapshot`) and the badge is the **current
+set of panes whose `agent_status` is `blocked`**, minus the pane you are focused on. It
+cannot drift, because nothing accumulates: a pane leaves the badge when its agent stops
+waiting — i.e. when you reply. `done` does not badge; a finished run is information, not a
+request for input.
+
+The status vocabulary (`idle` / `working` / `blocked` / `done` / `unknown`) and every field
+name come from `herdr api schema --json`, which is bundled in the binary and prints without
+a running server.
+
+Anything a **counted** app notifies about that does not parse lands in a **fallback bucket**
 (`other`) rather than being dropped. That is deliberate: the parse is a locale-dependent
 string match, and a broken parse should look like a visible `other: 4`, not like silence.
 
@@ -109,9 +130,17 @@ only by loading it in a running shell.
   account you looked at. Per-account clearing needs
   [thunderbird-attention-bridge](https://github.com/mkoester/thunderbird-attention-bridge),
   which reports folder navigation from inside Thunderbird.
-- **herdr is matched by notification text**, which is fragile — herdr has a proper event
-  API (`pane.agent_status_changed` over `~/.config/herdr/herdr.sock`) that should replace
-  this. See the roadmap.
+- **The herdr provider polls; it does not subscribe.** herdr's socket API has an event
+  stream (`events.subscribe` → `pane.agent_status_changed`) which would be lower-latency,
+  but a poll is stateless and self-healing: a herdr restart, a dropped connection or a
+  missed event all recover on the next tick rather than freezing the badge silently. The
+  cost is up to `herdrPollSeconds` (default 3) of lag and one process spawn per tick.
+- **If `herdr api snapshot` fails, the herdr badge clears** rather than holding stale
+  entries. herdr not running does mean nothing is waiting; a transient failure blanks it
+  for one tick.
+- **The herdr snapshot parsing has never seen a live snapshot.** Field names and the status
+  vocabulary come from the bundled schema, which is authoritative for *shape* — but no
+  captured output was ever compared against it.
 - **Do-not-disturb is untested**: whether suppressed notifications still reach the history
   is unverified, and if they do not, a DND window is invisible to the counter.
 
@@ -122,5 +151,5 @@ The two inputs above are one **provider**. The model is provider-agnostic on pur
 | Provider | Source | Buckets | Reset |
 |---|---|---|---|
 | `notifications` (done) | DMS notification history | regex over summary/body | window focus |
+| `herdr` (done) | `herdr api snapshot` poll | pane | none needed — it is state |
 | `thunderbird` | native host ← Thunderbird extension | account | folder navigation |
-| `herdr` | `herdr.sock` event subscription | pane | `pane.focused` |

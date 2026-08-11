@@ -69,15 +69,55 @@ const mailGerman = notif({
 });
 check("unparseable summary is still counted", R.parse(tb, mailGerman), { bucket: "other", count: 1 });
 
-// ── herdr: real shape, appName is plain notify-send ─────────────────────────
+// ── herdr is a STATE target, fed by its own API, not by notifications ───────
+// Window focus cannot mean "I dealt with that pane" for an app you sit inside,
+// so herdr must not be counted from the notification stream at all.
 const attention = notif({ appName: "notify-send", summary: "claude needs attention", body: "homelab · 3 · claude" });
-const finished = notif({ appName: "notify-send", summary: "claude finished", body: "homelab · 3 · lazygit" });
-const otherScript = notif({ appName: "notify-send", summary: "backup done", body: "nightly" });
 
-check("herdr matches 'needs attention'", R.matches(herdr, attention), true);
-check("herdr ignores 'finished'", R.matches(herdr, finished), false);
-check("herdr ignores an unrelated notify-send", R.matches(herdr, otherScript), false);
-check("herdr buckets by pane", R.parse(herdr, attention), { bucket: "homelab · 3 · claude", count: 1 });
+check("herdr is state-mode", herdr.mode, "state");
+check("a state target ignores notifications", R.matches(herdr, attention), false);
+
+// Snapshot fixture: field names and the agent_status vocabulary come from the
+// bundled schema (`herdr api schema --json`, SessionSnapshot / AgentInfo /
+// AgentStatus). The VALUES are invented — no live snapshot was ever captured, so
+// treat a field that turns out to be shaped differently as expected, not as a bug.
+const snapshot = {
+    focused_pane_id: "p9",
+    workspaces: [
+        { workspace_id: "w1", label: "homelab" },
+        { workspace_id: "w2", label: "extensions" }
+    ],
+    tabs: [
+        { tab_id: "t3", number: 3 },
+        { tab_id: "t4", number: 4 },
+        { tab_id: "t9", number: 9 }
+    ],
+    agents: [
+        { pane_id: "p1", workspace_id: "w1", tab_id: "t3", agent_status: "blocked", display_agent: "claude" },
+        { pane_id: "p2", workspace_id: "w1", tab_id: "t4", agent_status: "working", display_agent: "claude" },
+        { pane_id: "p3", workspace_id: "w2", tab_id: "t4", agent_status: "blocked", agent: "codex" },
+        { pane_id: "p4", workspace_id: "w1", tab_id: "t3", agent_status: "done", display_agent: "claude" },
+        // Blocked, but you are looking at it right now.
+        { pane_id: "p9", workspace_id: "w1", tab_id: "t9", agent_status: "blocked", display_agent: "claude" }
+    ]
+};
+
+const hb = R.herdrBuckets(snapshot);
+check("only blocked agents badge", Object.keys(hb).sort(), ["extensions · 4 · codex", "homelab · 3 · claude"]);
+check("the focused pane is excluded", hb["homelab · 9 · claude"], undefined);
+check("'done' does not badge", Object.keys(hb).length, 2);
+check("labels match herdr's own notification shape", hb["homelab · 3 · claude"], 1);
+check("falls back to agent when display_agent is absent", hb["extensions · 4 · codex"], 1);
+check("an empty snapshot yields nothing", R.herdrBuckets({ agents: [] }), {});
+check("a missing snapshot does not throw", R.herdrBuckets(null), {});
+
+// State mode replaces rather than accumulates — this is the whole point.
+let st = R.setTargetBuckets(R.emptyState(), "herdr", hb);
+check("state buckets are set", R.totalFor(st, "herdr"), 2);
+st = R.setTargetBuckets(st, "herdr", { "homelab · 3 · claude": 1 });
+check("a later poll REPLACES, never adds", R.totalFor(st, "herdr"), 1);
+st = R.setTargetBuckets(st, "herdr", {});
+check("nothing blocked removes the target entirely", st.targets.herdr, undefined);
 
 // ── Folding history ─────────────────────────────────────────────────────────
 // Newest-first, exactly as DMS stores it, with one entry already seen.
@@ -95,7 +135,10 @@ check("per-account buckets", R.bucketList(s, "thunderbird"), [
     { name: "other@example.com", count: 2 },
     { name: "mk@example.de", count: 1 }
 ]);
-check("herdr counted independently", R.totalFor(s, "herdr"), 1);
+check("herdr is not fed by the notification stream", R.totalFor(s, "herdr"), 0);
+
+// Give herdr some state so the isolation check below has something to preserve.
+s = R.setTargetBuckets(s, "herdr", { "homelab · 3 · claude": 1 });
 
 // Re-folding the same history must be a no-op — the daemon re-reads historyList
 // on every change, including dismissals and prunes.

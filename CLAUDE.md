@@ -51,6 +51,26 @@ both memory and the online docs. `PLUGINS/` in it ships worked examples, a
   `MaxAgeDays` 7, and it can be disabled). It is the *arrival hook* only — the counts are
   ours and are persisted separately, deliberately.
 
+## Why herdr is a state target, not a counter (2026-08-11)
+
+The first version counted herdr from its notifications and **the number only ever grew** —
+correctly, and uselessly. The reset fires on `activeToplevelChanged`, and you are normally
+*already focused on herdr* when an agent blocks, so no focus change ever happens. Clearing
+on arrival instead would have pinned it at zero. **Window focus cannot express "I dealt
+with that pane"** for an app you live inside; that is a granularity limit, not a bug, and
+no amount of tuning the counter fixes it.
+
+The fix was to change the model. `mode: "state"` targets are *replaced* on every provider
+poll rather than accumulated, so they cannot drift and need no reset: a pane leaves the
+badge when its agent stops being blocked. `matches()` returns false for state targets so
+the notification stream cannot double-feed them.
+
+**`herdr api schema --json` works with no running server** — it is bundled in the binary —
+so `SessionSnapshot`, `AgentInfo` and the `AgentStatus` enum
+(`idle`/`working`/`blocked`/`done`/`unknown`) are measured, not guessed. Use it before
+touching anything herdr-shaped; `herdr agent list` and `herdr api snapshot` both need the
+socket and are therefore blocked in the sandbox.
+
 ## Unverified / open
 
 - Whether **do-not-disturb** suppresses entries from reaching `historyList`. If it does, a
@@ -59,3 +79,11 @@ both memory and the online docs. `PLUGINS/` in it ships worked examples, a
   shape. None appeared in the 50-entry sample.
 - The **widget** has never been observed rendering — as of the first session it was loaded
   and the daemon was confirmed counting via IPC, but the bar half is untested.
+- **No live `herdr api snapshot` output has ever been seen** (the socket is blocked in the
+  sandbox). The parsing is written against the bundled schema, which fixes the field names
+  but not, for instance, whether the CLI wraps the snapshot in an envelope. First check if
+  the herdr badge stays empty: `herdr api snapshot | head -c 400`.
+- **The `mk.herdr` window class is still unconfirmed** on a live window. It no longer
+  affects herdr (a state target needs no focus reset) but it is the model for how
+  Thunderbird's reset works, and `status()` now prints the focused class so it is one call
+  to check.

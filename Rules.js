@@ -8,10 +8,19 @@
 // State shape:
 //   { lastSeenTs: <ms>, targets: { <targetId>: { <bucketName>: <count> } } }
 
+// A target is fed either by counting notifications ("count") or by a provider
+// reporting current state ("state"). The distinction is not cosmetic:
+//
+//   count — accumulates, needs an explicit reset, can drift. Right for mail: you
+//           do not live in Thunderbird and messages genuinely pile up.
+//   state — replaced wholesale on every poll, cannot drift, needs no reset at all.
+//           Right for herdr: you sit inside that window, so window focus can never
+//           mean "I dealt with that pane", and a counter there only ever grows.
 function defaultTargets() {
     return [
         {
             id: "thunderbird",
+            mode: "count",
             label: "Thunderbird",
             icon: "mail",
             // Read off a live window (hyprctl -j clients), NOT from the .desktop file:
@@ -31,15 +40,13 @@ function defaultTargets() {
         },
         {
             id: "herdr",
+            mode: "state",
             label: "herdr",
             icon: "terminal",
+            // Kept for the popout header only — a state target needs no focus reset.
             windowClass: "mk.herdr",
-            // herdr shells out to plain notify-send with no --app-name, so it has no
-            // app identity of its own; the summary is the only thing that marks it.
-            match: { appName: "notify-send", summaryPattern: " needs attention$" },
-            // body is "<workspace> · <pane> · <program>"
-            bucket: { source: "body", pattern: "^(.+)$", nameGroup: 1 },
-            fallbackBucket: "agent"
+            // Fed by polling `herdr api snapshot`; see herdrBuckets() below.
+            provider: "herdr"
         }
     ];
 }
@@ -55,6 +62,10 @@ function _field(entry, name) {
 
 // Does this notification belong to this target?
 function matches(target, entry) {
+    // A state target is owned by its provider. Letting notifications also feed it
+    // would double-count and reintroduce exactly the drift state mode removes.
+    if (target.mode === "state")
+        return false;
     const m = target.match || {};
     if (m.desktopEntry && _field(entry, "desktopEntry") !== m.desktopEntry)
         return false;
@@ -134,6 +145,57 @@ function clearTarget(state, targetId) {
     return { lastSeenTs: state.lastSeenTs, targets: targets };
 }
 
+// Replace a target's buckets outright — how a state provider reports. Passing an
+// empty object removes the target, so "nothing is blocked any more" needs no
+// separate clear call and cannot be forgotten.
+function setTargetBuckets(state, targetId, buckets) {
+    const targets = Object.assign({}, state.targets);
+    const names = Object.keys(buckets || {});
+    if (names.length === 0)
+        delete targets[targetId];
+    else
+        targets[targetId] = Object.assign({}, buckets);
+    return { lastSeenTs: state.lastSeenTs, targets: targets };
+}
+
+// A herdr session snapshot (`herdr api snapshot`) -> buckets.
+//
+// "Needs attention" is agent_status === "blocked". The agent statuses are
+// idle/working/blocked/done/unknown, from the bundled API schema — `done` is a
+// finished run, which is information but not a request for input, so it does not
+// badge. The focused pane is excluded: you are looking at it right now.
+function herdrBuckets(snapshot) {
+    const agents = (snapshot && snapshot.agents) || [];
+    const focusedPane = snapshot ? snapshot.focused_pane_id : null;
+
+    const workspaceLabels = {};
+    ((snapshot && snapshot.workspaces) || []).forEach(function (w) {
+        workspaceLabels[w.workspace_id] = w.label || w.workspace_id;
+    });
+    const tabNumbers = {};
+    ((snapshot && snapshot.tabs) || []).forEach(function (t) {
+        tabNumbers[t.tab_id] = t.number !== undefined ? t.number : t.label;
+    });
+
+    let buckets = {};
+    agents.forEach(function (a) {
+        if (a.agent_status !== "blocked")
+            return;
+        if (focusedPane && a.pane_id === focusedPane)
+            return;
+        // Same shape as herdr's own notification body, so the badge and the toast
+        // name a pane identically: "<workspace> · <tab> · <agent>".
+        const parts = [
+            workspaceLabels[a.workspace_id] || a.workspace_id,
+            tabNumbers[a.tab_id],
+            a.display_agent || a.agent || "agent"
+        ].filter(function (p) { return p !== undefined && p !== null && p !== ""; });
+        const name = parts.join(" · ");
+        buckets[name] = (buckets[name] || 0) + 1;
+    });
+    return buckets;
+}
+
 function clearBucket(state, targetId, bucketName) {
     const buckets = Object.assign({}, state.targets[targetId] || {});
     delete buckets[bucketName];
@@ -178,6 +240,8 @@ if (typeof module !== "undefined" && module.exports) {
         parse: parse,
         applyEntry: applyEntry,
         applyHistory: applyHistory,
+        setTargetBuckets: setTargetBuckets,
+        herdrBuckets: herdrBuckets,
         clearTarget: clearTarget,
         clearBucket: clearBucket,
         totalFor: totalFor,
