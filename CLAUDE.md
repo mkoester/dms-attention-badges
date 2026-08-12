@@ -124,11 +124,39 @@ fork it, add `plugins/mkoester-attention-badges.json` naming this repo, open a P
 and `Attention Badges` already satisfy the id rules (camelCase, letters only). `dms plugins
 install` then clones the repo named in that entry, and the API is `api.danklinux.com/plugins`.
 
-Two things to do first, neither hard: **the repo must be public** (it is private), and the
-defaults are personal — the `mk.herdr` window class, the herdr provider and the Thunderbird
-account parsing are MK's setup, not sensible universals. For publication they want to become
-configuration with empty defaults, so the plugin ships as "watch these apps" rather than
-"watch mine". Same shape as the browser/Thunderbird extensions before release.
+**3. De-personalise before publishing (agreed 2026-08-12).** The plugin currently ships MK's
+setup as its built-in defaults. What has to change, concretely:
+
+- **`Rules.js: defaultTargets()` is the whole problem.** It hardcodes two targets, one of
+  which names a window class invented on this machine (`mk.herdr`, which exists only because
+  a ghostty launcher was given that `--class`), and the other a regex over Thunderbird's
+  English notification text. Targets must become **user configuration**; these two become
+  *presets* a user can add, not defaults that fire on install.
+- **A window class cannot ship as a default at all** — it is only knowable from a live
+  window (`hyprctl -j clients`), varies per machine and per launcher, and a wrong one fails
+  silently. It has to be a field the user fills in, ideally with a "pick from running
+  windows" affordance.
+- **The daemon hardcodes `"thunderbird"`** in two places — the bridge's `applyVisits` call
+  and the focus-clear exemption. Both should key off a target *property* (`resetProvider`)
+  rather than an id.
+- **The settings UI is two named toggles.** It needs a list editor; DMS ships
+  `ListSetting.qml` / `ListSettingWithInput.qml` / `SelectionSetting.qml` / `StringSetting`
+  in `Modules/Plugins/`, so the components exist and this is assembly, not invention.
+- **Strings are hardcoded English.** DMS uses `I18n.tr(...)` throughout; a published plugin
+  should too.
+- **herdr becomes an optional provider**, declared in `plugin.json` `dependencies` and
+  inert when the binary is absent — right now the poll simply fails every tick and clears.
+- The registry entry additionally wants `category`, `compositors` and a **screenshot**, so
+  one is needed of the bar with a couple of live badges.
+
+The shape to aim for: the plugin ships knowing *how* to watch things (notifications, a herdr
+poll, a bridge file) and **nothing about what**. Same de-personalising pass Bookmarks-plus
+and `thunderbird_send_as` went through before release. MK's own targets then live in his
+plugin settings like anyone else's — which is also the honest test that the configuration is
+actually sufficient.
+
+Also required, and separate: **the repo must be public** (it is private), since the registry
+entry is a public GitHub URL that `dms plugins install` clones.
 
 ## Unverified / open
 
