@@ -103,6 +103,33 @@ Consequences to keep in mind when changing either side:
 - The bridge reports **every identity of the visited account**, because mail arrives at
   aliases and buckets are keyed by whatever address the notification named.
 
+## TODO
+
+**1. Fleet install — the repo has to move to `~/src` first (2026-08-12).** The shared DMS
+baseline (`workstation-private/shared/dms/base.json`) now lists `attentionBadges` in the bar,
+so every machine expects the plugin, but it only exists inside `workspace_extensions` on
+`mkDell`. Installing it fleet-wide needs a **fixed path that does not depend on a workspace
+being cloned**, which is exactly the vault's rule: *"a repo whose deployment needs a clone at
+a fixed path outside the workspace is outside-tree, not nested — and gets no second clone"*
+([ai-workspaces](../../okf/practices/ai-workspaces.md#adding-a-member-to-an-existing-workspace)).
+So: move to `~/src/dms-attention-badges`, reference it from `workspace_extensions` via
+`.code-workspace` + `additionalDirectories` exactly as `dotfiles` is, and have `install.sh`
+clone it and symlink it into `~/.config/DankMaterialShell/plugins/attentionBadges` under
+`DF_DMS`. **Not done — MK to confirm the move.**
+
+**2. Publishing to the DMS registry — possible, and the path is concrete.** The registry is a
+git repo, `github.com/AvengeMedia/dms-plugin-registry` (85 stars, active), not a web form:
+fork it, add `plugins/mkoester-attention-badges.json` naming this repo, open a PR. Its
+`CONTRIBUTING.md` requires `id` and `name` to match `plugin.json` exactly — `attentionBadges`
+and `Attention Badges` already satisfy the id rules (camelCase, letters only). `dms plugins
+install` then clones the repo named in that entry, and the API is `api.danklinux.com/plugins`.
+
+Two things to do first, neither hard: **the repo must be public** (it is private), and the
+defaults are personal — the `mk.herdr` window class, the herdr provider and the Thunderbird
+account parsing are MK's setup, not sensible universals. For publication they want to become
+configuration with empty defaults, so the plugin ships as "watch these apps" rather than
+"watch mine". Same shape as the browser/Thunderbird extensions before release.
+
 ## Unverified / open
 
 - Whether **do-not-disturb** suppresses entries from reaching `historyList`. If it does, a
