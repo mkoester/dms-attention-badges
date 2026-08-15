@@ -1,13 +1,22 @@
 #!/usr/bin/env node
-// Unit tests for Rules.js — the parsing/state logic behind the badges.
+// Unit tests for Rules.js — the provider format and the parsing/state logic
+// behind the badges — plus the shipped command provider in providers/.
 //
-// The fixtures below are SHAPE-FAITHFUL copies of real entries taken from
-// ~/.cache/DankMaterialShell/notification_history.json (only the mail addresses
-// were replaced, since this repo may go public). That matters: a tidy invented
-// fixture would pass whatever the regex does, and the whole risk here is that
-// Thunderbird's real wording differs from what we remember it being.
+// The notification fixtures below are SHAPE-FAITHFUL copies of real entries taken
+// from ~/.cache/DankMaterialShell/notification_history.json (only the mail
+// addresses were replaced, since this repo may go public). That matters: a tidy
+// invented fixture would pass whatever the regex does, and the whole risk here is
+// that Thunderbird's real wording differs from what we remember it being.
+//
+// The SHIPPED provider files are loaded from disk rather than restated here, so
+// a broken preset fails this suite instead of failing silently in the bar.
 
+const fs = require("fs");
+const path = require("path");
 const R = require("../Rules.js");
+const HERDR = require("../providers/herdr-attention");
+
+const PROVIDERS_DIR = path.join(__dirname, "..", "providers");
 
 let failed = 0;
 let ran = 0;
@@ -22,9 +31,140 @@ function check(name, actual, expected) {
     }
 }
 
-const T = R.defaultTargets();
-const tb = T.find(t => t.id === "thunderbird");
-const herdr = T.find(t => t.id === "herdr");
+function ok(name, cond) {
+    check(name, !!cond, true);
+}
+
+function readProvider(file) {
+    return JSON.parse(fs.readFileSync(path.join(PROVIDERS_DIR, file), "utf8"));
+}
+
+// ── Path expansion ──────────────────────────────────────────────────────────
+// A provider file must never carry an absolute home path, so the core expands
+// the handful of variables it is allowed to use. Tested against an explicit env
+// so it does not depend on the machine running the suite.
+const ENV = { HOME: "/home/tester" };
+check("~ expands", R.expandPath("~/x", ENV), "/home/tester/x");
+check("$HOME expands", R.expandPath("$HOME/x", ENV), "/home/tester/x");
+check("${HOME} expands", R.expandPath("${HOME}/x", ENV), "/home/tester/x");
+check("XDG_STATE_HOME defaults per spec", R.expandPath("$XDG_STATE_HOME/x", ENV), "/home/tester/.local/state/x");
+check("an explicit XDG_STATE_HOME wins", R.expandPath("$XDG_STATE_HOME/x", { HOME: "/h", XDG_STATE_HOME: "/state" }), "/state/x");
+check("XDG_CONFIG_HOME defaults per spec", R.expandPath("$XDG_CONFIG_HOME/x", ENV), "/home/tester/.config/x");
+check("an absolute path is untouched", R.expandPath("/etc/x", ENV), "/etc/x");
+check("an empty path stays empty", R.expandPath("", ENV), "");
+// A tilde only counts at the start — "a~/b" is a filename, not a home reference.
+check("a mid-string tilde is not expanded", R.expandPath("/a~/b", ENV), "/a~/b");
+
+// ── The shipped presets must parse ──────────────────────────────────────────
+const tbFile = readProvider("thunderbird.json");
+const herdrFile = readProvider("herdr.json");
+
+const tbParsed = R.parseProvider(tbFile);
+check("the Thunderbird preset parses", tbParsed.errors, []);
+const herdrParsed = R.parseProvider(herdrFile);
+check("the herdr preset parses", herdrParsed.errors, []);
+
+const tb = tbParsed.target;
+const herdr = herdrParsed.target;
+
+check("a notifications source counts", tb.mode, "count");
+check("a command source defaults to state", herdr.mode, "state");
+check("the preset keeps its window class", tb.windowClass, "org.mozilla.Thunderbird");
+check("the preset declares a per-bucket file", typeof tb.perBucketFile, "string");
+check("...which is not an absolute home path", tb.perBucketFile.indexOf("/home/"), -1);
+check("a state target has no window class", herdr.windowClass, undefined);
+check("the herdr preset polls every 3s", herdr.intervalSeconds, 3);
+
+// ── Provider validation ─────────────────────────────────────────────────────
+// Every rejection must name its reason: a provider that fails to load is shown
+// in the settings page, and "invalid" with no explanation is unactionable.
+function errorsFor(data) {
+    return R.parseProvider(data).errors;
+}
+function rejects(name, data, fragment) {
+    const errs = errorsFor(data);
+    ran++;
+    const hit = errs.some(function (e) { return e.indexOf(fragment) !== -1; });
+    if (!hit) {
+        failed++;
+        console.error(`FAIL  ${name}\n        expected an error containing ${JSON.stringify(fragment)}\n        actual   ${JSON.stringify(errs)}`);
+    }
+}
+
+const minimal = { id: "x", source: { kind: "notifications", appName: "X" } };
+check("a minimal provider is valid", errorsFor(minimal), []);
+check("label defaults to the id", R.parseProvider(minimal).target.label, "x");
+check("icon has a neutral default", R.parseProvider(minimal).target.icon, "notifications");
+
+rejects("no id", { source: { kind: "notifications", appName: "X" } }, "id must match");
+rejects("a dashed id", { id: "my-app", source: { kind: "notifications", appName: "X" } }, "id must match");
+rejects("an id starting uppercase", { id: "App", source: { kind: "notifications", appName: "X" } }, "id must match");
+rejects("no source", { id: "x" }, "missing source object");
+rejects("an unknown kind", { id: "x", source: { kind: "dbus" } }, "source.kind must be one of");
+rejects("notifications with no criteria", { id: "x", source: { kind: "notifications" } }, "at least one of");
+rejects("a bad summary regex", { id: "x", source: { kind: "notifications", summaryPattern: "([" } }, "summaryPattern is not a valid regex");
+rejects("a bad bucket regex", { id: "x", source: { kind: "notifications", appName: "X", bucket: { pattern: "([" } } }, "bucket.pattern is not a valid regex");
+rejects("a bucket with no pattern", { id: "x", source: { kind: "notifications", appName: "X", bucket: {} } }, "bucket.pattern is not a valid regex");
+rejects("a command that is not a list", { id: "x", source: { kind: "command", command: "herdr" } }, "non-empty array of strings");
+rejects("an empty command", { id: "x", source: { kind: "command", command: [] } }, "non-empty array of strings");
+rejects("a reset on a state target", { id: "x", source: { kind: "command", command: ["y"] }, reset: { kind: "windowFocus", windowClass: "y" } }, "state target takes no reset");
+rejects("an unknown reset kind", { id: "x", source: { kind: "notifications", appName: "X" }, reset: { kind: "timer" } }, "reset.kind must be");
+rejects("a reset with no window class", { id: "x", source: { kind: "notifications", appName: "X" }, reset: { kind: "windowFocus" } }, "reset.windowClass is required");
+rejects("a non-object", "hello", "not a JSON object");
+
+// A rejected provider must yield NO target — a half-built one whose match rules
+// failed to apply would swallow every notification on the system.
+check("a rejected provider yields no target", R.parseProvider({ id: "x", source: { kind: "notifications" } }).target, null);
+
+// A command target may opt into counting; the default is state, and the two must
+// be distinguishable or the mode setting would be untestable.
+check("a command target can count", R.parseProvider({ id: "x", source: { kind: "command", command: ["y"], mode: "count" } }).target.mode, "count");
+check("an unknown mode falls back to state", R.parseProvider({ id: "x", source: { kind: "command", command: ["y"], mode: "wat" } }).target.mode, "state");
+check("intervalSeconds has a default", R.parseProvider({ id: "x", source: { kind: "command", command: ["y"] } }).target.intervalSeconds, 5);
+check("a sub-second interval is refused, not honoured", R.parseProvider({ id: "x", source: { kind: "command", command: ["y"], intervalSeconds: 0 } }).target.intervalSeconds, 5);
+
+// ── buildTargets ────────────────────────────────────────────────────────────
+const built = R.buildTargets([
+    { source: "thunderbird.json", data: tbFile },
+    { source: "herdr.json", data: herdrFile }
+]);
+check("both presets build", built.targets.map(t => t.id), ["thunderbird", "herdr"]);
+check("nothing invalid", built.invalid, []);
+check("each target remembers its file", built.targets[0].source, "thunderbird.json");
+
+const withJunk = R.buildTargets([
+    { source: "good.json", data: minimal },
+    { source: "broken.json", data: { id: "y" } }
+]);
+check("a broken file does not stop the good ones", withJunk.targets.map(t => t.id), ["x"]);
+check("...and is reported with its filename", withJunk.invalid[0].source, "broken.json");
+ok("...and with a reason", withJunk.invalid[0].errors.length > 0);
+
+const dupes = R.buildTargets([
+    { source: "user.json", data: minimal },
+    { source: "shipped.json", data: minimal }
+]);
+check("a duplicate id is refused", dupes.targets.length, 1);
+check("...the first one wins", dupes.invalid[0].source, "shipped.json");
+ok("...and the winner is named in the error", dupes.invalid[0].errors[0].indexOf("user.json") !== -1);
+
+check("no files means no targets, not a crash", R.buildTargets([]), { targets: [], invalid: [] });
+check("undefined input does not throw", R.buildTargets(undefined), { targets: [], invalid: [] });
+
+// ── The command stdout contract ─────────────────────────────────────────────
+// Every failure must be distinguishable from an empty-but-valid result, because
+// they render identically in the bar.
+check("a valid payload parses", R.parseCommandOutput('{"buckets":{"a":2,"b":1}}'), { buckets: { a: 2, b: 1 }, error: null });
+check("an empty bucket set is valid, not an error", R.parseCommandOutput('{"buckets":{}}'), { buckets: {}, error: null });
+check("no output is an error", R.parseCommandOutput("").error, "no output");
+check("whitespace only is an error", R.parseCommandOutput("  \n ").error, "no output");
+ok("non-JSON says so", R.parseCommandOutput("herdr: command not found").error.indexOf("not JSON") === 0);
+ok("a bare array is rejected", R.parseCommandOutput("[1,2]").error.indexOf("not an object") !== -1);
+ok("a missing buckets key says so", R.parseCommandOutput('{"agents":[]}').error.indexOf('missing "buckets"') !== -1);
+check("counts are floored to integers", R.parseCommandOutput('{"buckets":{"a":2.7}}').buckets, { a: 2 });
+check("a zero count is dropped", R.parseCommandOutput('{"buckets":{"a":0,"b":1}}').buckets, { b: 1 });
+ok("...and the drop is reported, not silent", R.parseCommandOutput('{"buckets":{"a":0,"b":1}}').error !== null);
+check("a non-numeric count is dropped", R.parseCommandOutput('{"buckets":{"a":"lots"}}').buckets, {});
 
 function notif(o) {
     return Object.assign(
@@ -47,6 +187,8 @@ const mailPlural = notif({
     body: "Some subject from Some Sender"
 });
 // Real entry: Thunderbird also emits non-mail notifications on the same app id.
+// Confirmed still true 2026-08-15 against a live history file, where the one
+// non-mail entry was "Failed to connect to server …".
 const mailError = notif({
     appName: "Thunderbird",
     desktopEntry: "org.mozilla.Thunderbird",
@@ -69,18 +211,19 @@ const mailGerman = notif({
 });
 check("unparseable summary is still counted", R.parse(tb, mailGerman), { bucket: "other", count: 1 });
 
-// ── herdr is a STATE target, fed by its own API, not by notifications ───────
+// ── State targets are not fed by notifications ──────────────────────────────
 // Window focus cannot mean "I dealt with that pane" for an app you sit inside,
-// so herdr must not be counted from the notification stream at all.
+// so a state target must not be counted from the notification stream at all.
 const attention = notif({ appName: "notify-send", summary: "claude needs attention", body: "homelab · 3 · claude" });
 
 check("herdr is state-mode", herdr.mode, "state");
 check("a state target ignores notifications", R.matches(herdr, attention), false);
 
+// ── The herdr command provider ──────────────────────────────────────────────
 // Snapshot fixture: field names and the agent_status vocabulary come from the
 // bundled schema (`herdr api schema --json`, SessionSnapshot / AgentInfo /
 // AgentStatus). The VALUES are invented — no live snapshot was ever captured, so
-// treat a field that turns out to be shaped differently as expected, not as a bug.
+// treat a field that turns out to be shaped differently as expected, not a bug.
 const snapshot = {
     focused_pane_id: "p9",
     workspaces: [
@@ -107,14 +250,14 @@ const snapshot = {
 // parsed cleanly and found zero agents on every poll — the badge sat at 0 and
 // nothing anywhere reported an error. This is the regression test for that.
 const enveloped = { id: "cli:api:snapshot", result: { snapshot: snapshot } };
-check("the CLI envelope is unwrapped", R.unwrapSnapshot(enveloped), snapshot);
-check("a bare snapshot still works", R.unwrapSnapshot(snapshot), snapshot);
-check("a result without the snapshot wrapper works", R.unwrapSnapshot({ result: snapshot }), snapshot);
-check("an unrecognisable payload is null, not a silent empty", R.unwrapSnapshot({ id: "x", result: {} }), null);
-check("enveloped input produces the same buckets as bare", R.herdrBuckets(enveloped), R.herdrBuckets(snapshot));
-check("enveloped input is not empty", Object.keys(R.herdrBuckets(enveloped)).length, 3);
+check("the CLI envelope is unwrapped", HERDR.unwrapSnapshot(enveloped), snapshot);
+check("a bare snapshot still works", HERDR.unwrapSnapshot(snapshot), snapshot);
+check("a result without the snapshot wrapper works", HERDR.unwrapSnapshot({ result: snapshot }), snapshot);
+check("an unrecognisable payload is null, not a silent empty", HERDR.unwrapSnapshot({ id: "x", result: {} }), null);
+check("enveloped input produces the same buckets as bare", HERDR.herdrBuckets(enveloped), HERDR.herdrBuckets(snapshot));
+check("enveloped input is not empty", Object.keys(HERDR.herdrBuckets(enveloped)).length, 3);
 
-const hb = R.herdrBuckets(snapshot);
+const hb = HERDR.herdrBuckets(snapshot);
 check("blocked and done both badge, marked apart", Object.keys(hb).sort(), [
     "● extensions · 4 · codex",
     "● homelab · 3 · claude",
@@ -124,25 +267,62 @@ check("the focused pane is excluded", hb["● homelab · 9 · claude"], undefine
 check("'working' does not badge", Object.keys(hb).length, 3);
 check("labels match herdr's own notification shape", hb["● homelab · 3 · claude"], 1);
 check("falls back to agent when display_agent is absent", hb["● extensions · 4 · codex"], 1);
-check("an empty snapshot yields nothing", R.herdrBuckets({ agents: [] }), {});
-check("a missing snapshot does not throw", R.herdrBuckets(null), {});
+check("an empty snapshot yields nothing", HERDR.herdrBuckets({ agents: [] }), {});
+check("a missing snapshot does not throw", HERDR.herdrBuckets(null), {});
 
-// The watched statuses are configurable — blocked-only must still work, and must
-// differ from the default, or the setting would be untestable.
-const blockedOnly = R.herdrBuckets(snapshot, ["blocked"]);
+// The watched statuses are configurable through the provider file's command
+// arguments — blocked-only must work, and must differ from the default, or the
+// argument would be untestable.
+const blockedOnly = HERDR.herdrBuckets(snapshot, ["blocked"]);
 check("blocked-only drops the done entry", Object.keys(blockedOnly).length, 2);
 check("...and keeps the blocked ones", blockedOnly["● homelab · 3 · claude"], 1);
-check("an empty status list falls back to the default", Object.keys(R.herdrBuckets(snapshot, [])).length, 3);
+check("an empty status list falls back to the default", Object.keys(HERDR.herdrBuckets(snapshot, [])).length, 3);
 
-// State mode replaces rather than accumulates — this is the whole point.
-let st = R.setTargetBuckets(R.emptyState(), "herdr", hb);
-check("state buckets are set", R.totalFor(st, "herdr"), 3);
-st = R.setTargetBuckets(st, "herdr", { "homelab · 3 · claude": 1 });
-check("a later poll REPLACES, never adds", R.totalFor(st, "herdr"), 1);
-st = R.setTargetBuckets(st, "herdr", {});
-check("nothing blocked removes the target entirely", st.targets.herdr, undefined);
+check("--statuses is parsed", HERDR.parseArgs(["--statuses", "blocked"]).statuses, ["blocked"]);
+check("--statuses splits and trims", HERDR.parseArgs(["--statuses", "blocked, done"]).statuses, ["blocked", "done"]);
+check("no arguments means the default", HERDR.parseArgs([]).statuses, HERDR.HERDR_ATTENTION);
+
+// The diagnostic must describe what was SEEN, not just the verdict — an empty
+// bucket set is what "nothing is waiting" looks like AND what a wrong field name
+// looks like, so the histogram is the only thing that separates them.
+const described = HERDR.describe(snapshot, ["blocked", "done"], hb);
+ok("the diagnostic counts agents", described.indexOf("5 agents") !== -1);
+ok("...reports the status vocabulary as it really came back", described.indexOf("blocked=3 done=1 working=1") !== -1);
+ok("...names the focused pane that was excluded", described.indexOf("focused=p9") !== -1);
+ok("...and the resulting bucket count", described.indexOf("3 buckets") !== -1);
+// The case the diagnostic exists for: nothing waiting, but agents present.
+ok("an empty result still reports what was seen", HERDR.describe({ agents: [{ agent_status: "idle" }] }, ["blocked"], {}).indexOf("1 agents [idle=1]") !== -1);
+ok("a genuinely empty snapshot says so", HERDR.describe({ agents: [] }, ["blocked"], {}).indexOf("(no agents)") !== -1);
+
+// End to end through the real entry point: the script reads a captured payload,
+// prints the contract, and the core parses it. This is the join the two halves
+// meet at, and it is the one thing neither test above exercises.
+(function () {
+    const cp = require("child_process");
+    const tmp = path.join(process.env.TMPDIR || "/tmp", "attention-snapshot-" + process.pid + ".json");
+    fs.writeFileSync(tmp, JSON.stringify(enveloped));
+    const run = cp.spawnSync(
+        path.join(PROVIDERS_DIR, "herdr-attention"),
+        ["--snapshot", tmp],
+        { encoding: "utf8" }
+    );
+    fs.unlinkSync(tmp);
+
+    check("the script exits 0 on a good snapshot", run.status, 0);
+    const parsed = R.parseCommandOutput(run.stdout);
+    check("the script's real output satisfies the contract", parsed.error, null);
+    check("...and carries the same buckets", parsed.buckets, hb);
+
+    // stdout is the contract; a diagnostic printed there would corrupt it, and
+    // the corruption would be invisible until a badge silently stopped working.
+    check("stdout is exactly one JSON line", run.stdout.trim().split("\n").length, 1);
+    ok("stdout carries no diagnostic text", run.stdout.indexOf("agents [") === -1);
+    ok("the diagnostic goes to stderr", run.stderr.indexOf("agents [") !== -1);
+})();
 
 // ── Folding history ─────────────────────────────────────────────────────────
+const T = [tb, herdr];
+
 // Newest-first, exactly as DMS stores it, with one entry already seen.
 const history = [
     Object.assign({}, mailPlural, { timestamp: 5000 }),
@@ -158,7 +338,7 @@ check("per-account buckets", R.bucketList(s, "thunderbird"), [
     { name: "other@example.com", count: 2 },
     { name: "mk@example.de", count: 1 }
 ]);
-check("herdr is not fed by the notification stream", R.totalFor(s, "herdr"), 0);
+check("a state target is not fed by the notification stream", R.totalFor(s, "herdr"), 0);
 
 // Give herdr some state so the isolation check below has something to preserve.
 s = R.setTargetBuckets(s, "herdr", { "homelab · 3 · claude": 1 });
@@ -180,9 +360,18 @@ check("clearing one bucket leaves the rest", R.totalFor(R.clearBucket(s, "thunde
 check("clearing the last bucket drops the target", R.clearBucket(s, "herdr", "homelab · 3 · claude").targets.herdr, undefined);
 check("a cleared target reports zero, not NaN", R.totalFor(R.emptyState(), "thunderbird"), 0);
 
-// ── Thunderbird bridge: per-account clearing ────────────────────────────────
-// Without the bridge, focusing Thunderbird clears every account (clearTarget).
-// With it, only the accounts you actually opened clear.
+// ── Orphan pruning ──────────────────────────────────────────────────────────
+// Deleting a provider file must not leave its counts in the persisted state,
+// where they are invisible but return the moment the id reappears.
+const orphaned = R.setTargetBuckets(s, "gone", { x: 3 });
+check("state for a removed provider is dropped", R.pruneOrphans(orphaned, T).targets.gone, undefined);
+check("...and live providers survive", R.totalFor(R.pruneOrphans(orphaned, T), "thunderbird"), 3);
+check("pruning with nothing to prune returns the same object", R.pruneOrphans(s, T), s);
+check("pruning against no targets empties it", R.pruneOrphans(s, []).targets, {});
+
+// ── Per-bucket resets ───────────────────────────────────────────────────────
+// Without the helper file, focusing the app clears every bucket (clearTarget).
+// With it, only the buckets you actually opened clear.
 const now = Date.now();
 let bs = R.emptyState();
 bs = R.applyHistory(bs, T, [
@@ -224,7 +413,7 @@ let cs = R.applyEntry(R.emptyState(), T, notif({
     timestamp: 400
 }));
 cs = R.applyVisits(cs, "thunderbird", { version: 1, updatedAt: now, visits: { "mk@example.de": now } });
-check("address matching is case-insensitive", R.totalFor(cs, "thunderbird"), 0);
+check("bucket matching is case-insensitive", R.totalFor(cs, "thunderbird"), 0);
 
 // visitsSeen must survive ordinary counting, or every notification would make
 // the next file read look new and re-clear a bucket that just counted mail.
@@ -236,6 +425,7 @@ const carried = R.applyEntry(bs, T, notif({
 }));
 check("visitsSeen survives counting", carried.visitsSeen["mk@example.de"], now + 1000);
 check("...and survives a focus clear", R.clearTarget(carried, "thunderbird").visitsSeen["mk@example.de"], now + 1000);
+check("...and survives an orphan prune", R.pruneOrphans(carried, T).visitsSeen["mk@example.de"], now + 1000);
 
 // ── Window-class lookup (the focus side) ────────────────────────────────────
 check("window class maps to its target", R.targetForWindowClass(T, "org.mozilla.Thunderbird").id, "thunderbird");

@@ -8,47 +8,261 @@
 // State shape:
 //   { lastSeenTs: <ms>, targets: { <targetId>: { <bucketName>: <count> } } }
 
+// ── The provider format ─────────────────────────────────────────────────────
+//
+// This plugin knows HOW to watch things and nothing about WHAT. Every watched
+// app is described by a JSON file in the providers directory; nothing about
+// Thunderbird, herdr or any other program appears in this file. The two presets
+// shipped in providers/ are examples, not defaults — an install with no provider
+// files badges nothing, which is the correct behaviour for a stranger.
+//
 // A target is fed either by counting notifications ("count") or by a provider
 // reporting current state ("state"). The distinction is not cosmetic:
 //
 //   count — accumulates, needs an explicit reset, can drift. Right for mail: you
-//           do not live in Thunderbird and messages genuinely pile up.
+//           do not live in your mail client and messages genuinely pile up.
 //   state — replaced wholesale on every poll, cannot drift, needs no reset at all.
-//           Right for herdr: you sit inside that window, so window focus can never
-//           mean "I dealt with that pane", and a counter there only ever grows.
-function defaultTargets() {
-    return [
-        {
-            id: "thunderbird",
-            mode: "count",
-            label: "Thunderbird",
-            icon: "mail",
-            // Read off a live window (hyprctl -j clients), NOT from the .desktop file:
-            // Thunderbird advertises StartupWMClass=thunderbird and maps as this.
-            windowClass: "org.mozilla.Thunderbird",
-            match: { desktopEntry: "org.mozilla.Thunderbird" },
-            // "mk@example.de received 2 new messages" -> bucket "mk@example.de", count 2
-            bucket: {
-                source: "summary",
-                pattern: "^(\\S+@\\S+) received (\\d+) new messages?$",
-                nameGroup: 1,
-                countGroup: 2
-            },
-            // Anything Thunderbird notifies about that is not new mail (connection
-            // failures, calendar reminders) lands here rather than being dropped.
-            fallbackBucket: "other"
-        },
-        {
-            id: "herdr",
-            mode: "state",
-            label: "herdr",
-            icon: "terminal",
-            // Kept for the popout header only — a state target needs no focus reset.
-            windowClass: "mk.herdr",
-            // Fed by polling `herdr api snapshot`; see herdrBuckets() below.
-            provider: "herdr"
+//           Right for anything you sit inside, where window focus can never mean
+//           "I dealt with that", and a counter only ever grows.
+
+// Provider ids become state keys and settings keys, so they are constrained to
+// the same shape DMS requires of plugin ids: no dashes, no dots, no spaces.
+var ID_PATTERN = /^[a-z][a-zA-Z0-9]*$/;
+var SOURCE_KINDS = ["notifications", "command"];
+var DEFAULT_INTERVAL_SECONDS = 5;
+
+// Expand the few variables a provider file is allowed to use. Provider files
+// must never carry an absolute home path — they are meant to be copied between
+// machines and users — so the expansion happens here, from an explicit env
+// object, which also makes it testable without touching the real environment.
+function expandPath(path, env) {
+    if (typeof path !== "string" || path === "")
+        return "";
+    const e = env || {};
+    const home = e.HOME || "";
+    const vars = {
+        HOME: home,
+        XDG_STATE_HOME: e.XDG_STATE_HOME || (home ? home + "/.local/state" : ""),
+        XDG_CONFIG_HOME: e.XDG_CONFIG_HOME || (home ? home + "/.config" : ""),
+        XDG_CACHE_HOME: e.XDG_CACHE_HOME || (home ? home + "/.cache" : "")
+    };
+    let out = path;
+    if (out.indexOf("~/") === 0)
+        out = home + out.slice(1);
+    Object.keys(vars).forEach(function (name) {
+        out = out.split("${" + name + "}").join(vars[name]);
+        out = out.split("$" + name).join(vars[name]);
+    });
+    return out;
+}
+
+function _isPlainObject(v) {
+    return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+// Does this string compile as a regex? A bad pattern in a provider file must be
+// reported at load time — left to run time it would throw inside the fold and
+// take the whole badge down for every app, not just the broken one.
+function _regexError(pattern) {
+    try {
+        new RegExp(pattern);
+        return null;
+    } catch (e) {
+        return String(e.message || e);
+    }
+}
+
+// One provider file -> { target, errors }. `target` is null when errors is
+// non-empty; a partially valid provider is never returned, because a target
+// missing its match criteria would silently swallow every notification.
+function parseProvider(data) {
+    const errors = [];
+    const fail = function (msg) { errors.push(msg); };
+
+    if (!_isPlainObject(data))
+        return { target: null, errors: ["not a JSON object"] };
+
+    const id = data.id;
+    if (typeof id !== "string" || !ID_PATTERN.test(id))
+        fail("id must match " + ID_PATTERN + " (got " + JSON.stringify(id) + ")");
+
+    const source = data.source;
+    if (!_isPlainObject(source)) {
+        fail("missing source object");
+        return { target: null, errors: errors };
+    }
+    if (SOURCE_KINDS.indexOf(source.kind) === -1)
+        fail("source.kind must be one of " + SOURCE_KINDS.join(", ") + " (got " + JSON.stringify(source.kind) + ")");
+
+    const target = {
+        id: id,
+        label: typeof data.label === "string" && data.label ? data.label : id,
+        icon: typeof data.icon === "string" && data.icon ? data.icon : "notifications"
+    };
+
+    if (source.kind === "notifications") {
+        // A notification source always counts: it observes arrivals, and an
+        // arrival is an event, never a state.
+        target.mode = "count";
+        target.match = {};
+        if (typeof source.desktopEntry === "string" && source.desktopEntry)
+            target.match.desktopEntry = source.desktopEntry;
+        if (typeof source.appName === "string" && source.appName)
+            target.match.appName = source.appName;
+        if (typeof source.summaryPattern === "string" && source.summaryPattern) {
+            const err = _regexError(source.summaryPattern);
+            if (err)
+                fail("source.summaryPattern is not a valid regex: " + err);
+            else
+                target.match.summaryPattern = source.summaryPattern;
         }
-    ];
+        if (Object.keys(target.match).length === 0)
+            fail("a notifications source needs at least one of desktopEntry, appName, summaryPattern");
+
+        if (source.bucket !== undefined) {
+            if (!_isPlainObject(source.bucket)) {
+                fail("source.bucket must be an object");
+            } else {
+                const err = _regexError(source.bucket.pattern);
+                if (typeof source.bucket.pattern !== "string" || err)
+                    fail("source.bucket.pattern is not a valid regex: " + (err || "missing"));
+                else
+                    target.bucket = {
+                        source: source.bucket.source === "body" ? "body" : "summary",
+                        pattern: source.bucket.pattern,
+                        nameGroup: source.bucket.nameGroup || 1,
+                        countGroup: source.bucket.countGroup || 0
+                    };
+            }
+        }
+        target.fallbackBucket = typeof source.fallbackBucket === "string" && source.fallbackBucket
+            ? source.fallbackBucket
+            : "other";
+    } else if (source.kind === "command") {
+        target.mode = source.mode === "count" ? "count" : "state";
+        if (!Array.isArray(source.command) || source.command.length === 0 ||
+            !source.command.every(function (a) { return typeof a === "string"; }))
+            fail("source.command must be a non-empty array of strings");
+        else
+            target.command = source.command.slice();
+        const interval = source.intervalSeconds;
+        target.intervalSeconds = typeof interval === "number" && interval >= 1
+            ? interval
+            : DEFAULT_INTERVAL_SECONDS;
+    }
+
+    // Resets only make sense for counters. A state target is replaced on every
+    // poll, so a reset could only ever race with the next poll — and declaring
+    // one is a sign the author has the two modes confused, which is worth saying
+    // out loud rather than ignoring.
+    const reset = data.reset;
+    if (reset !== undefined) {
+        if (!_isPlainObject(reset)) {
+            fail("reset must be an object");
+        } else if (target.mode === "state") {
+            fail("a state target takes no reset — it is replaced on every poll");
+        } else if (reset.kind !== "windowFocus") {
+            fail('reset.kind must be "windowFocus" (got ' + JSON.stringify(reset.kind) + ")");
+        } else if (typeof reset.windowClass !== "string" || !reset.windowClass) {
+            fail("reset.windowClass is required, and must be read off a LIVE window");
+        } else {
+            target.windowClass = reset.windowClass;
+            // Optional: an external helper reports which buckets you actually
+            // looked at, so focus clears those rather than the whole app. The
+            // file EXISTING is what switches the behaviour — see bridgeIsLive().
+            if (typeof reset.perBucketFile === "string" && reset.perBucketFile)
+                target.perBucketFile = reset.perBucketFile;
+        }
+    }
+
+    return errors.length ? { target: null, errors: errors } : { target: target, errors: [] };
+}
+
+// Every discovered provider file -> { targets, invalid }. `invalid` is carried
+// rather than dropped: a provider that fails to load must be visible in the
+// settings page and in status(), because a silently skipped file looks exactly
+// like an app that simply has not notified yet.
+function buildTargets(files) {
+    const targets = [];
+    const invalid = [];
+    const seen = {};
+
+    (files || []).forEach(function (file) {
+        const source = (file && file.source) || "(unknown)";
+        const result = parseProvider(file && file.data);
+        if (!result.target) {
+            invalid.push({ source: source, errors: result.errors });
+            return;
+        }
+        // First file wins, so a user override placed earlier in the scan cannot
+        // be clobbered by a shipped preset with the same id.
+        if (seen[result.target.id]) {
+            invalid.push({ source: source, errors: ["duplicate id " + result.target.id + ", already defined by " + seen[result.target.id]] });
+            return;
+        }
+        seen[result.target.id] = source;
+        result.target.source = source;
+        targets.push(result.target);
+    });
+
+    return { targets: targets, invalid: invalid };
+}
+
+// The stdout contract for a command provider: {"buckets": {"<name>": <count>}}.
+//
+// Deliberately strict, and deliberately loud. The predecessor of this function
+// read a field off the wrong nesting level of a payload it had never seen, and
+// succeeded on every poll while finding nothing — which is indistinguishable
+// from "nothing is waiting". So every rejection here carries a reason, and the
+// daemon reports what it SAW (bytes, parsed, bucket count), not just its verdict.
+function parseCommandOutput(text) {
+    const raw = typeof text === "string" ? text.trim() : "";
+    if (raw === "")
+        return { buckets: {}, error: "no output" };
+
+    let payload;
+    try {
+        payload = JSON.parse(raw);
+    } catch (e) {
+        return { buckets: {}, error: "not JSON: " + String(e.message || e) };
+    }
+    if (!_isPlainObject(payload))
+        return { buckets: {}, error: "top level is not an object" };
+    if (!_isPlainObject(payload.buckets))
+        return { buckets: {}, error: 'missing "buckets" object' };
+
+    const buckets = {};
+    let skipped = 0;
+    Object.keys(payload.buckets).forEach(function (name) {
+        const count = payload.buckets[name];
+        if (typeof count !== "number" || !isFinite(count) || count < 1) {
+            skipped++;
+            return;
+        }
+        buckets[name] = Math.floor(count);
+    });
+    return {
+        buckets: buckets,
+        error: skipped ? skipped + " bucket(s) had a non-positive count and were dropped" : null
+    };
+}
+
+// Drop state belonging to providers that no longer exist. Without this, deleting
+// a provider file leaves its counts in the persisted state forever — invisible
+// in the bar (nothing renders it) but still there, and back the moment a
+// provider with the same id reappears.
+function pruneOrphans(state, targets) {
+    const live = {};
+    (targets || []).forEach(function (t) { live[t.id] = true; });
+    const kept = {};
+    let dropped = false;
+    Object.keys((state && state.targets) || {}).forEach(function (id) {
+        if (live[id])
+            kept[id] = state.targets[id];
+        else
+            dropped = true;
+    });
+    return dropped ? Object.assign({}, state, { targets: kept }) : state;
 }
 
 function emptyState() {
@@ -158,82 +372,16 @@ function setTargetBuckets(state, targetId, buckets) {
     return Object.assign({}, state, { targets: targets });
 }
 
-// The agent statuses, from the bundled API schema (`herdr api schema --json`):
-// idle / working / blocked / done / unknown. Two of them want you:
+// ── Per-bucket resets ───────────────────────────────────────────────────────
+// A counted target may name a `reset.perBucketFile`. Some helper — for
+// Thunderbird it is a MailExtension plus a native host — writes
+// {version, updatedAt, visits:{<bucket>: ms}} there when you look at one bucket
+// of that app. Its presence is what upgrades the reset from "focusing the window
+// clears the whole app" to "clears the bucket you opened".
 //
-//   blocked — waiting for your input
-//   done    — finished, waiting for your review
-//
-// Marked distinctly because they are different jobs, using the same visual
-// language herdr's own sidebar uses (a dot for blocked, a check for done).
-var HERDR_ATTENTION = ["blocked", "done"];
-var HERDR_MARKS = { blocked: "●", done: "✓" };
-
-// `herdr api snapshot` does NOT print a bare SessionSnapshot — it prints the
-// socket response envelope around it:
-//
-//   {"id":"cli:api:snapshot","result":{"snapshot":{ …SessionSnapshot… }}}
-//
-// Measured 2026-08-11. The bundled schema describes the snapshot, not the CLI's
-// framing, so writing against the schema alone produced a parser that succeeded
-// on every poll and found zero agents forever. Accept the bare form too, so a
-// future CLI change in either direction keeps working.
-function unwrapSnapshot(payload) {
-    if (!payload || typeof payload !== "object")
-        return null;
-    if (payload.agents !== undefined)
-        return payload;
-    const result = payload.result;
-    if (result && typeof result === "object") {
-        if (result.snapshot && result.snapshot.agents !== undefined)
-            return result.snapshot;
-        if (result.agents !== undefined)
-            return result;
-    }
-    return null;
-}
-
-// A herdr session snapshot (`herdr api snapshot`) -> buckets.
-// The focused pane is excluded: you are looking at it right now.
-function herdrBuckets(payload, statuses) {
-    const wanted = statuses && statuses.length ? statuses : HERDR_ATTENTION;
-    const snapshot = unwrapSnapshot(payload);
-    const agents = (snapshot && snapshot.agents) || [];
-    const focusedPane = snapshot ? snapshot.focused_pane_id : null;
-
-    const workspaceLabels = {};
-    ((snapshot && snapshot.workspaces) || []).forEach(function (w) {
-        workspaceLabels[w.workspace_id] = w.label || w.workspace_id;
-    });
-    const tabNumbers = {};
-    ((snapshot && snapshot.tabs) || []).forEach(function (t) {
-        tabNumbers[t.tab_id] = t.number !== undefined ? t.number : t.label;
-    });
-
-    let buckets = {};
-    agents.forEach(function (a) {
-        if (wanted.indexOf(a.agent_status) === -1)
-            return;
-        if (focusedPane && a.pane_id === focusedPane)
-            return;
-        // Same shape as herdr's own notification body, so the badge and the toast
-        // name a pane identically: "<workspace> · <tab> · <agent>".
-        const parts = [
-            workspaceLabels[a.workspace_id] || a.workspace_id,
-            tabNumbers[a.tab_id],
-            a.display_agent || a.agent || "agent"
-        ].filter(function (p) { return p !== undefined && p !== null && p !== ""; });
-        const mark = HERDR_MARKS[a.agent_status] || "•";
-        const name = mark + " " + parts.join(" · ");
-        buckets[name] = (buckets[name] || 0) + 1;
-    });
-    return buckets;
-}
-
-// ── Thunderbird bridge ──────────────────────────────────────────────────────
-// thunderbird-attention-bridge writes {version, updatedAt, visits:{address: ms}}
-// when you open a folder. Its presence is what upgrades Thunderbird from
-// "focusing the window clears every account" to "clears the account you opened".
+// Nothing here is Thunderbird-specific: a bucket is whatever the provider's
+// regex produced, and any app that can report which of its own sections you
+// visited can use the same file.
 
 // Stale enough that the extension was probably uninstalled — fall back to focus
 // clearing rather than leaving a dead file in charge of the reset forever.
@@ -248,10 +396,14 @@ function bridgeIsLive(payload, nowMs) {
     return updatedAt > 0 && (nowMs - updatedAt) < BRIDGE_MAX_AGE_MS;
 }
 
-// Clear the buckets of accounts visited since we last looked. Visits already
-// processed are remembered in state.visitsSeen, so re-reading the file — which
-// happens on every write, and once at startup — never re-clears a bucket that
-// has legitimately counted new mail since the visit.
+// Clear the buckets visited since we last looked. Visits already processed are
+// remembered in state.visitsSeen, so re-reading the file — which happens on
+// every write, and once at startup — never re-clears a bucket that has
+// legitimately counted something new since the visit.
+//
+// visitsSeen is keyed globally rather than per target: a bucket name is unique
+// enough in practice, and a per-target map would have to be migrated the first
+// time somebody renames a provider.
 function applyVisits(state, targetId, payload) {
     const visits = (payload && payload.visits) || {};
     const seen = Object.assign({}, state.visitsSeen || {});
@@ -313,7 +465,11 @@ function targetForWindowClass(targets, appId) {
 
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
-        defaultTargets: defaultTargets,
+        expandPath: expandPath,
+        parseProvider: parseProvider,
+        buildTargets: buildTargets,
+        parseCommandOutput: parseCommandOutput,
+        pruneOrphans: pruneOrphans,
         emptyState: emptyState,
         matches: matches,
         parse: parse,
@@ -322,9 +478,6 @@ if (typeof module !== "undefined" && module.exports) {
         setTargetBuckets: setTargetBuckets,
         bridgeIsLive: bridgeIsLive,
         applyVisits: applyVisits,
-        herdrBuckets: herdrBuckets,
-        unwrapSnapshot: unwrapSnapshot,
-        HERDR_ATTENTION: HERDR_ATTENTION,
         clearTarget: clearTarget,
         clearBucket: clearBucket,
         totalFor: totalFor,

@@ -1,11 +1,14 @@
 # Attention Badges — a DankMaterialShell plugin
 
-Per-app badges in the DMS bar showing **what happened since you last focused that app**:
-new mail per Thunderbird account, agents waiting in herdr. Focus the app's window and
-its badge clears.
+Per-app badges in the DMS bar showing **what happened since you last focused that app**.
+Focus the app's window and its badge clears.
 
 Not an unread counter. A mailbox with 4000 unread messages shows nothing until something
 new arrives.
+
+The plugin knows **how** to watch things and nothing about **what**. Every watched app is a
+small JSON file you drop in a directory — so out of the box it badges nothing, and what it
+badges is entirely yours.
 
 ## How it works
 
@@ -16,23 +19,36 @@ Two inputs, both already present in DMS:
 | what happened | `NotificationService.historyList` — every entry carries `appName`, `desktopEntry`, `summary`, `body`, `timestamp` |
 | when you looked | `ToplevelManager.activeToplevel.appId` — the focused window's class |
 
-The **daemon** surface folds new notifications into a per-app, per-bucket count and clears
-a target when its window class gains focus. It runs whether or not the bar widget is
-placed, so counting never depends on the widget being visible. State is persisted through
+...plus one optional third: a **command** you name, polled on an interval, which prints what
+is currently waiting.
+
+The **daemon** surface discovers providers, folds new events into a per-app, per-bucket count
+and clears a target when its window class gains focus. It runs whether or not the bar widget
+is placed, so counting never depends on the widget being visible. State is persisted through
 `PluginService.savePluginState`, so a shell restart does not silently zero the badges.
 
-The **widget** surface only renders. The daemon is the single writer, so two monitors
-showing the widget cannot disagree.
+The **widget** surface only renders. The daemon is the single writer — it even publishes the
+target list for the widget and the settings page to read — so two monitors showing the widget
+cannot disagree.
 
-### Buckets
+## Providers
 
-A target can split its count by a regex over the notification text:
+Drop one JSON file per watched app into:
 
-- **Thunderbird** emits `mk@example.de received 2 new messages` — so the account is the
-  bucket and the count comes from the message itself. It batches a poll into one
-  notification and tells you how many mails it stands for, so the badge counts *mails*,
-  not popups.
-- **herdr** does not count at all — see below.
+```sh
+mkdir -p ~/.config/DankMaterialShell/attention-providers
+```
+
+Working examples live in `providers/` in this repository. They are **examples, not
+defaults** — copy the ones you want:
+
+```sh
+cp providers/thunderbird.json ~/.config/DankMaterialShell/attention-providers/
+```
+
+```sh
+dms ipc call attentionBadges reload
+```
 
 ### Counting vs. state
 
@@ -40,36 +56,139 @@ Two kinds of target, and the difference is load-bearing:
 
 | mode | behaviour | right for |
 |---|---|---|
-| `count` | accumulates notifications, cleared by focusing the window | Thunderbird |
-| `state` | replaced wholesale on every poll of a provider, no reset at all | herdr |
+| `count` | accumulates events, cleared by focusing the window | mail, chat, a build queue |
+| `state` | replaced wholesale on every poll, no reset at all | anything you sit *inside* |
 
-Counting is wrong for an app you **sit inside**. If you are already focused on herdr when
-an agent blocks, no focus change ever happens, so a counter only grows; clearing on arrival
-instead would pin it at zero. Window focus simply cannot express *"I dealt with that pane"*.
+Counting is wrong for an app you sit inside. If you are already focused on it when something
+starts waiting, no focus change ever happens, so a counter only grows; clearing on arrival
+instead would pin it at zero. **Window focus cannot express "I dealt with that"** for such an
+app — that is a granularity limit, not a bug, and no amount of tuning a counter fixes it.
 
-So herdr is polled from its own API (`herdr api snapshot`) and the badge is the **current
-set of panes whose agent wants you**, minus the pane you are focused on. It cannot drift,
-because nothing accumulates: a pane leaves the badge when its agent stops waiting.
+A `notifications` source is always `count`: it observes arrivals, and an arrival is an event.
+A `command` source is `state` unless it says otherwise.
 
-Two of the five statuses count, and they are marked apart because they are different jobs:
+### A notifications provider
 
-| status | means | mark |
-|---|---|---|
-| `blocked` | waiting for your input | `●` |
-| `done` | finished, waiting for your review | `✓` |
+```json
+{
+    "id": "thunderbird",
+    "label": "Thunderbird",
+    "icon": "mail",
+    "source": {
+        "kind": "notifications",
+        "desktopEntry": "org.mozilla.Thunderbird",
+        "bucket": {
+            "source": "summary",
+            "pattern": "^(\\S+@\\S+) received (\\d+) new messages?$",
+            "nameGroup": 1,
+            "countGroup": 2
+        },
+        "fallbackBucket": "other"
+    },
+    "reset": {
+        "kind": "windowFocus",
+        "windowClass": "org.mozilla.Thunderbird",
+        "perBucketFile": "$XDG_STATE_HOME/thunderbird-attention-bridge/visits.json"
+    }
+}
+```
 
-`idle`, `working` and `unknown` never badge. Finished agents can be excluded with the
-**Badge finished agents too** toggle.
+| Field | Meaning |
+|---|---|
+| `id` | `^[a-z][a-zA-Z0-9]*$`. Becomes the state key and the settings key, so renaming it starts the count over. |
+| `source.desktopEntry` / `appName` / `summaryPattern` | Which notifications belong to this app. At least one is required — a target with no criteria would swallow everything. |
+| `source.bucket` | Optional. Splits the count by a regex over the notification text. Group `nameGroup` names the bucket; group `countGroup` (if given) says how many events the notification stands for. |
+| `source.fallbackBucket` | Where anything that does not parse goes. Defaults to `other`. |
+| `reset.windowClass` | **Read this off a live window**, never from a `.desktop` file — see below. |
+| `reset.perBucketFile` | Optional; see per-bucket resets. |
 
-The status vocabulary (`idle` / `working` / `blocked` / `done` / `unknown`) and every field
-name come from `herdr api schema --json`, which is bundled in the binary and prints without
-a running server. Note the agent-detection scripts embedded in herdr only know
-`working`/`blocked`/`idle`, so `done` is derived by herdr itself — and it appears to leave
-that state once you look at the pane, which is exactly what a state badge wants.
+Thunderbird emits `mk@example.de received 2 new messages` — so the account is the bucket and
+the count comes from the message itself. It batches a poll into one notification and says how
+many mails it stands for, so the badge counts *mails*, not popups.
 
-Anything a **counted** app notifies about that does not parse lands in a **fallback bucket**
-(`other`) rather than being dropped. That is deliberate: the parse is a locale-dependent
-string match, and a broken parse should look like a visible `other: 4`, not like silence.
+Anything a counted app notifies about that does not parse lands in the **fallback bucket**
+rather than being dropped. That is deliberate: the parse is a locale-dependent string match,
+and a broken parse should look like a visible `other: 4`, not like silence. Thunderbird's
+`Failed to connect to server …` notifications land there, which is correct — that is also
+something you want to see.
+
+### A command provider
+
+```json
+{
+    "id": "herdr",
+    "label": "herdr",
+    "icon": "terminal",
+    "source": {
+        "kind": "command",
+        "command": ["$HOME/.local/bin/herdr-attention", "--statuses", "blocked,done"],
+        "intervalSeconds": 3,
+        "mode": "state"
+    }
+}
+```
+
+The command must print exactly this on stdout:
+
+```json
+{"buckets": {"● homelab · 3 · claude": 1, "✓ extensions · 4 · codex": 1}}
+```
+
+Anything else — a non-zero exit, unparseable output, a missing `buckets` key, a count below 1
+— clears that target for the tick and records the reason, visible in
+`dms ipc call attentionBadges status`. Clearing rather than holding stale entries is
+deliberate: for a `state` target, "the producer is gone" and "nothing is waiting" are the same
+answer, and a badge frozen on old data is worse than an empty one.
+
+It **polls; it does not subscribe.** A poll is stateless and self-healing: a restarted
+producer, a dropped connection or a missed event all recover on the next tick rather than
+freezing the badge silently. The cost is up to `intervalSeconds` of lag and one process spawn
+per tick.
+
+Note that a command provider runs a command you named, from a file you wrote, on every tick.
+That is the same trust level as any DMS plugin (which is arbitrary QML), but it is worth
+saying out loud.
+
+**Give the command an absolute path, not a bare name.** The shell usually runs from a systemd
+user unit, whose `PATH` is the user manager's — typically `/usr/local/bin:/usr/bin:/bin` and
+**not** `~/.local/bin`. A command that works perfectly in your terminal can therefore fail to
+spawn here, and `$HOME`/`$XDG_*` expansion exists precisely so the file can say where it is
+without hardcoding your home directory.
+
+`providers/herdr-attention` is a worked example: it calls `herdr api snapshot`, keeps the
+panes whose agent is `blocked` (`●`, waiting for your input) or `done` (`✓`, waiting for your
+review), drops the pane you are currently focused on, and prints the contract:
+
+```sh
+ln -s "$PWD/providers/herdr-attention" ~/.local/bin/herdr-attention
+```
+
+### Per-bucket resets
+
+A counted target may name a `reset.perBucketFile`. If some helper writes that file, focusing
+the app clears only the buckets you actually opened instead of all of them:
+
+```json
+{"version": 1, "updatedAt": 1754923200000, "visits": {"mk@example.de": 1754923100000}}
+```
+
+**The file existing is the switch.** No file — the normal case — and the focus reset clears
+the whole app, which is the only thing the compositor makes possible: it reports that a window
+gained focus and nothing about what you looked at inside it. A file older than 7 days counts
+as abandoned and the fallback returns, so an uninstalled helper cannot leave a dead file in
+charge of the reset.
+
+Counting is unaffected either way. For Thunderbird,
+[thunderbird-attention-bridge](https://github.com/mkoester/thunderbird-attention-bridge)
+is such a helper — it reports which accounts you opened and nothing else, because the
+notification counts are already accurate and a second source of truth for the same number is
+a liability.
+
+### Paths
+
+Provider files must not contain absolute home paths, so that they can be copied between
+machines and users. `~`, `$HOME`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME` and `$XDG_CACHE_HOME`
+are expanded, in both `perBucketFile` and command arguments.
 
 ## Install
 
@@ -81,20 +200,31 @@ mkdir -p ~/.config/DankMaterialShell/plugins
 ln -s "$PWD" ~/.config/DankMaterialShell/plugins/attentionBadges
 ```
 
-The directory does not exist on a machine that has never installed a plugin, and DMS
-points its directory watcher at it *at startup* — so if `dms plugins list` does not show
-the plugin after creating it, `dms restart`.
+The directory does not exist on a machine that has never installed a plugin, and DMS points
+its directory watcher at it *at startup* — so if `dms plugins list` does not show the plugin
+after creating it, `dms restart`.
 
-Then enable it in Settings → Plugins, and add the widget in **Settings → DankBar →
-Widgets** (Left / Center / Right section). A plugin whose widget is greyed out there with
-*"Plugin is disabled"* is not enabled yet.
+Then enable it in Settings → Plugins, and add the widget in **Settings → DankBar → Widgets**
+(Left / Center / Right section). A plugin whose widget is greyed out there with *"Plugin is
+disabled"* is not enabled yet.
 
 ## Verify
 
-The badge is otherwise only observable by waiting for mail, so the daemon exposes IPC:
+The badge is otherwise only observable by waiting for something to happen, so the daemon
+exposes IPC:
 
 ```sh
 dms ipc call attentionBadges status
+```
+
+`status` reports the focused window class, every discovered provider with the file it came
+from, how each one is being reset, the last poll of each command provider (bytes, buckets,
+error, stderr) — and every provider file that failed to load, **with its reason**. A rejected
+file is never silently skipped: that would look exactly like an app which simply has not
+notified yet.
+
+```sh
+dms ipc call attentionBadges reload
 ```
 
 ```sh
@@ -105,37 +235,16 @@ dms ipc call attentionBadges clear
 dms ipc call attentionBadges clearOne thunderbird
 ```
 
-Right-clicking the widget also clears everything (it calls the same IPC, so there stays
-one writer).
+Right-clicking the widget also clears everything (it calls the same IPC, so there stays one
+writer).
 
 The window classes the reset depends on must be read off a **live window**, never from a
-`.desktop` file — `StartupWMClass` is a prediction and is wrong for Thunderbird:
+`.desktop` file — `StartupWMClass` is a prediction and is wrong for Thunderbird, which
+advertises `thunderbird` and actually maps as `org.mozilla.Thunderbird`:
 
 ```sh
 hyprctl -j clients | grep -i class
 ```
-
-## Optional: per-account clearing for Thunderbird
-
-Install [thunderbird-attention-bridge](https://github.com/mkoester/thunderbird-attention-bridge)
-and focusing Thunderbird stops clearing everything — only the accounts whose folders you
-actually opened clear.
-
-It works by writing
-`$XDG_STATE_HOME/thunderbird-attention-bridge/visits.json`, which this plugin watches:
-
-```json
-{"version": 1, "updatedAt": 1754923200000, "visits": {"mk@example.de": 1754923100000}}
-```
-
-**The file existing is the switch.** No file — the normal case — and the focus reset behaves
-exactly as it always did, so the bridge is purely additive and can be removed at any time. A
-file older than 7 days counts as abandoned and the fallback returns, so an uninstalled
-extension cannot leave a dead file in charge of the reset.
-
-Counting is unaffected either way: the counts still come from Thunderbird's notifications,
-and the bridge only supplies the reset. `dms ipc call attentionBadges status` says which
-mode is in force.
 
 ## Tests
 
@@ -143,52 +252,30 @@ mode is in force.
 ./scripts/test
 ```
 
-Covers `Rules.js` — matching, parsing, folding history, resets. The fixtures are
-shape-faithful copies of real entries from
-`~/.cache/DankMaterialShell/notification_history.json` (addresses replaced), because a
-tidy invented fixture would pass whatever the regex happens to do.
+Covers `Rules.js` — the provider format and its validation, matching, parsing, folding
+history, resets, orphan pruning — and `providers/herdr-attention`, including one end-to-end
+run of the real script through the real stdout contract. The shipped provider files are loaded
+from disk by the suite, so a broken preset fails the tests rather than failing silently in the
+bar.
+
+The notification fixtures are shape-faithful copies of real entries from
+`~/.cache/DankMaterialShell/notification_history.json` (addresses replaced), because a tidy
+invented fixture would pass whatever the regex happens to do.
 
 **The QML is not covered by any automated check.** `qmllint`/`qmlformat` from
-`qt6-declarative` 6.11 cannot parse this codebase at all — they exit non-zero on shipped,
-working DMS files that use `?.`/`??` (verified against
-`Services/ClipboardService.qml`), so a green run would prove nothing. The QML is validated
-only by loading it in a running shell.
+`qt6-declarative` 6.11 exit non-zero on shipped, working DMS files that use `?.`/`??`
+(verified against `Services/ClipboardService.qml`), so a green run would prove nothing. The
+QML is validated only by loading it in a running shell.
 
 ## Known limits
 
-- **The Thunderbird parse is a localized UI string.** A locale change breaks it silently
-  except for everything landing in `other`.
-- **Focus resets a whole app** unless the bridge is installed — see below. Hyprland reports
-  that Thunderbird got focus, not which account you looked at.
-- **The herdr provider polls; it does not subscribe.** herdr's socket API has an event
-  stream (`events.subscribe` → `pane.agent_status_changed`) which would be lower-latency,
-  but a poll is stateless and self-healing: a herdr restart, a dropped connection or a
-  missed event all recover on the next tick rather than freezing the badge silently. The
-  cost is up to `herdrPollSeconds` (default 3) of lag and one process spawn per tick.
-- **If `herdr api snapshot` fails, the herdr badge clears** rather than holding stale
-  entries. herdr not running does mean nothing is waiting; a transient failure blanks it
-  for one tick.
-- **`herdr api snapshot` prints the socket response envelope**, not a bare snapshot:
-  `{"id":…,"result":{"snapshot":{…}}}`. Both forms are accepted. This is the one thing the
-  bundled schema could not tell us, and getting it wrong produced a parser that succeeded
-  on every poll and found zero agents forever.
-- **`done` clears when you view the pane** — confirmed 2026-08-11 by watching the status
-  histogram across a finishing run: `idle=2 done=1` with a `✓` bucket while away, back to
-  `idle=3` and an empty badge once the pane was opened. That is herdr's own behaviour, not
-  anything this plugin does, and it is why the review queue needs no acknowledgement step.
-- **Do-not-disturb is untested**: whether suppressed notifications still reach the history
-  is unverified, and if they do not, a DND window is invisible to the counter.
-
-## Roadmap
-
-The two inputs above are one **provider**. The model is provider-agnostic on purpose:
-
-| Provider | Source | Buckets | Reset |
-|---|---|---|---|
-| `notifications` (done) | DMS notification history | regex over summary/body | window focus |
-| `herdr` (done) | `herdr api snapshot` poll | pane | none needed — it is state |
-| `thunderbird` (done) | notifications, plus the bridge for resets | account | folder navigation |
-
-The Thunderbird one landed as a *reset* provider rather than a full one, which is smaller
-than originally scoped: the notification counts were already accurate, so the extension only
-supplies the thing the desktop cannot see.
+- **A notification parse is a localized UI string.** A locale change breaks it silently
+  except for everything landing in the fallback bucket.
+- **Focus resets a whole app** unless a per-bucket helper is installed. The compositor
+  reports which window got focus, not what you looked at inside it.
+- **A window class cannot be guessed.** It varies per machine and per launcher, and a wrong
+  one fails silently — `status` prints the focused class so it is one call to check.
+- **Do-not-disturb does not hide anything from the counter** — verified 2026-08-15 in
+  `Services/NotificationService.qml`: `doNotDisturb` gates only the popup, while history is
+  fed from a separate condition. The real blind spot is the freedesktop `transient` hint,
+  which keeps a notification out of history entirely, DND or not.

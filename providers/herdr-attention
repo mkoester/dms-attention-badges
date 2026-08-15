@@ -1,0 +1,192 @@
+#!/usr/bin/env node
+// A command provider for attentionBadges: which herdr panes want you right now.
+//
+// Prints the stdout contract the plugin expects and nothing else:
+//
+//   {"buckets": {"● homelab · 3 · claude": 1, "✓ extensions · 4 · codex": 1}}
+//
+// This lives OUTSIDE the plugin on purpose. The plugin knows how to run a
+// command every N seconds and read that one shape; it knows nothing about herdr,
+// its schema, or its status vocabulary. Everything herdr-specific is here, which
+// is also why it is testable under plain node while the QML is not.
+//
+// Usage:
+//   herdr-attention [--statuses blocked,done] [--snapshot <file>]
+//
+// --snapshot reads a captured payload instead of calling herdr, which is how the
+// test suite exercises the real code path without the socket.
+
+const { execFileSync, readFileSync } = (function () {
+    const cp = require("child_process");
+    const fs = require("fs");
+    return { execFileSync: cp.execFileSync, readFileSync: fs.readFileSync };
+})();
+
+// The agent statuses, from the bundled API schema (`herdr api schema --json`,
+// which works with no running server): idle / working / blocked / done /
+// unknown. Two of them want you:
+//
+//   blocked — waiting for your input
+//   done    — finished, waiting for your review
+//
+// Marked distinctly because they are different jobs, using the same visual
+// language herdr's own sidebar uses (a dot for blocked, a check for done).
+const HERDR_ATTENTION = ["blocked", "done"];
+const HERDR_MARKS = { blocked: "●", done: "✓" };
+
+// `herdr api snapshot` does NOT print a bare SessionSnapshot — it prints the
+// socket response envelope around it:
+//
+//   {"id":"cli:api:snapshot","result":{"snapshot":{ …SessionSnapshot… }}}
+//
+// Measured 2026-08-11. The bundled schema describes the payload, not the CLI's
+// framing, so writing against the schema alone produced a parser that succeeded
+// on every poll and found zero agents forever — indistinguishable from "nothing
+// is waiting". Accept the bare form too, so a change in either direction keeps
+// working.
+function unwrapSnapshot(payload) {
+    if (!payload || typeof payload !== "object")
+        return null;
+    if (payload.agents !== undefined)
+        return payload;
+    const result = payload.result;
+    if (result && typeof result === "object") {
+        if (result.snapshot && result.snapshot.agents !== undefined)
+            return result.snapshot;
+        if (result.agents !== undefined)
+            return result;
+    }
+    return null;
+}
+
+// A herdr session snapshot -> buckets.
+// The focused pane is excluded: you are looking at it right now.
+function herdrBuckets(payload, statuses) {
+    const wanted = statuses && statuses.length ? statuses : HERDR_ATTENTION;
+    const snapshot = unwrapSnapshot(payload);
+    const agents = (snapshot && snapshot.agents) || [];
+    const focusedPane = snapshot ? snapshot.focused_pane_id : null;
+
+    const workspaceLabels = {};
+    ((snapshot && snapshot.workspaces) || []).forEach(function (w) {
+        workspaceLabels[w.workspace_id] = w.label || w.workspace_id;
+    });
+    const tabNumbers = {};
+    ((snapshot && snapshot.tabs) || []).forEach(function (t) {
+        tabNumbers[t.tab_id] = t.number !== undefined ? t.number : t.label;
+    });
+
+    let buckets = {};
+    agents.forEach(function (a) {
+        if (wanted.indexOf(a.agent_status) === -1)
+            return;
+        if (focusedPane && a.pane_id === focusedPane)
+            return;
+        // Same shape as herdr's own notification body, so the badge and the toast
+        // name a pane identically: "<workspace> · <tab> · <agent>".
+        const parts = [
+            workspaceLabels[a.workspace_id] || a.workspace_id,
+            tabNumbers[a.tab_id],
+            a.display_agent || a.agent || "agent"
+        ].filter(function (p) { return p !== undefined && p !== null && p !== ""; });
+        const mark = HERDR_MARKS[a.agent_status] || "•";
+        const name = mark + " " + parts.join(" · ");
+        buckets[name] = (buckets[name] || 0) + 1;
+    });
+    return buckets;
+}
+
+// What the poll actually saw: agent count, a histogram of the status vocabulary
+// as it really came back, whether a focused pane was excluded, and how many
+// buckets resulted. This is the diagnostic that named the envelope bug in one
+// command after three rounds of ranked guessing (2026-08-11) — it is worth
+// keeping even when everything works, because its value is entirely in the
+// moment the output is empty and nobody knows why.
+function describe(snapshot, statuses, buckets) {
+    const agents = (snapshot && snapshot.agents) || [];
+    let seen = {};
+    agents.forEach(function (a) {
+        const s = a.agent_status || "(none)";
+        seen[s] = (seen[s] || 0) + 1;
+    });
+    const histogram = Object.keys(seen).sort().map(function (k) {
+        return k + "=" + seen[k];
+    }).join(" ") || "(no agents)";
+    return agents.length + " agents [" + histogram + "]"
+        + ", watching " + statuses.join(",")
+        + ", focused=" + (snapshot.focused_pane_id || "(none)")
+        + " -> " + Object.keys(buckets).length + " buckets";
+}
+
+function parseArgs(argv) {
+    const opts = { statuses: HERDR_ATTENTION.slice(), snapshotFile: null };
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === "--statuses" && argv[i + 1]) {
+            opts.statuses = argv[++i].split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+        } else if (argv[i] === "--snapshot" && argv[i + 1]) {
+            opts.snapshotFile = argv[++i];
+        }
+    }
+    return opts;
+}
+
+function main(argv) {
+    const opts = parseArgs(argv);
+    let raw;
+
+    try {
+        raw = opts.snapshotFile
+            ? readFileSync(opts.snapshotFile, "utf8")
+            : execFileSync("herdr", ["api", "snapshot"], { encoding: "utf8", timeout: 5000 });
+    } catch (e) {
+        // herdr not running is not an error worth failing on: nothing is waiting,
+        // which is exactly an empty badge. Exit 0 with empty buckets and put the
+        // reason on stderr, where the daemon surfaces it in status().
+        process.stderr.write("herdr-attention: " + String(e.message || e) + "\n");
+        process.stdout.write(JSON.stringify({ buckets: {} }) + "\n");
+        return 0;
+    }
+
+    let payload;
+    try {
+        payload = JSON.parse(raw);
+    } catch (e) {
+        process.stderr.write("herdr-attention: snapshot is not JSON (" + raw.length + " bytes): " + String(e.message || e) + "\n");
+        process.stdout.write(JSON.stringify({ buckets: {} }) + "\n");
+        return 1;
+    }
+
+    const snapshot = unwrapSnapshot(payload);
+    if (snapshot === null) {
+        // Loud, because this is the exact failure that once looked like success:
+        // a parse that works and finds nothing reads as "nothing is waiting".
+        process.stderr.write("herdr-attention: no snapshot found in payload (keys: " + Object.keys(payload).join(",") + ")\n");
+        process.stdout.write(JSON.stringify({ buckets: {} }) + "\n");
+        return 1;
+    }
+
+    const buckets = herdrBuckets(payload, opts.statuses);
+
+    // An empty result is the single most ambiguous thing this can print: it is
+    // what "nothing is waiting" looks like, and also what a wrong field name, a
+    // changed status vocabulary or an empty snapshot look like. So always say
+    // what was SEEN, not only the verdict — on stderr, because stdout is the
+    // contract and a diagnostic there would corrupt it. The daemon keeps the
+    // last line and shows it in `dms ipc call attentionBadges status`.
+    process.stderr.write("herdr-attention: " + describe(snapshot, opts.statuses, buckets) + "\n");
+
+    process.stdout.write(JSON.stringify({ buckets: buckets }) + "\n");
+    return 0;
+}
+
+if (require.main === module)
+    process.exit(main(process.argv.slice(2)));
+
+module.exports = {
+    unwrapSnapshot: unwrapSnapshot,
+    herdrBuckets: herdrBuckets,
+    describe: describe,
+    parseArgs: parseArgs,
+    main: main,
+    HERDR_ATTENTION: HERDR_ATTENTION
+};

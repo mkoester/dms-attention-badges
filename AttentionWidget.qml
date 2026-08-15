@@ -15,10 +15,18 @@ PluginComponent {
     layerNamespacePlugin: "attention-badges"
 
     readonly property string stateKey: "badgeState"
+    readonly property string targetsKey: "renderTargets"
     readonly property bool hideWhenIdle: pluginData.hideWhenIdle !== false
 
     property var state: Rules.emptyState()
-    property var targets: Rules.defaultTargets().filter(function (t) {
+    // Published by the daemon, which owns the provider scan. The widget never
+    // reads a provider file: two instances scanning the same directory could
+    // disagree, and one of them would be wrong on every monitor it is placed on.
+    // The list carries every valid provider; filtering to the enabled ones is
+    // done here, because pluginData is available to every surface.
+    property var allTargets: []
+
+    readonly property var targets: allTargets.filter(function (t) {
         return root.pluginData["enable_" + t.id] !== false;
     })
 
@@ -31,6 +39,8 @@ PluginComponent {
     function reload() {
         const saved = pluginService ? pluginService.loadPluginState(pluginId, stateKey, null) : null;
         state = (saved && saved.targets) ? saved : Rules.emptyState();
+        const published = pluginService ? pluginService.loadPluginState(pluginId, targetsKey, null) : null;
+        allTargets = (published && published.targets) ? published.targets : [];
     }
 
     Connections {

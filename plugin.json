@@ -1,7 +1,7 @@
 {
     "id": "attentionBadges",
     "name": "Attention Badges",
-    "description": "Per-app badges counting what happened since you last focused the app — new mail per Thunderbird account, agents waiting in herdr",
+    "description": "Per-app badges counting what happened since you last focused an app. Each watched app is a small JSON provider file, so the plugin itself knows nothing about any particular program",
     "version": "0.1.0",
     "author": "Mirko Köster",
     "type": "composite",
