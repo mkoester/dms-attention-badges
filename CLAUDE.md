@@ -266,8 +266,9 @@ features.** It knows *how* to watch things and nothing about *what*. Thunderbird
 two ordinary providers, and nothing in the QML or in `Rules.js` names either of them.
 
 A provider is a **JSON file** in `~/.config/DankMaterialShell/attention-providers/`, not code
-and not a second DMS plugin. `README.md` is the format's reference; what belongs here is why
-it is shaped this way:
+and not a second DMS plugin. Since 2026-08-15 the normal form is **one git clone per provider,
+in its own subdirectory, carrying `provider.json`** — see § "The split" below. `README.md` is
+the format's reference; what belongs here is why it is shaped this way:
 
 - **Data, not code, was chosen over two alternatives.** A provider-as-DMS-plugin would need
   its own `plugin.json`, QML and registry entry each, and would break the single-writer
@@ -288,6 +289,41 @@ it is shaped this way:
 - **`$XDG_*`/`~` expansion is the core's job** (`Rules.expandPath`, applied to
   `perBucketFile` *and* to command arguments), because a provider file carrying an absolute
   home path could not be copied between machines.
+
+### The split (2026-08-15)
+
+Each provider is now its own **private** repo, cloned into the scan directory. The plugin repo
+ships no provider at all.
+
+| Repo | Cloned to | Kind |
+|---|---|---|
+| `dms-attention-badges-tb` | `attention-providers/thunderbird` | `notifications` |
+| `dms-attention-badges-herdr` | `attention-providers/herdr` | `command` |
+
+`thunderbird-attention-bridge` **stays its own repo**, unchanged — the tb provider works with
+no bridge at all, and `visits.json` remains the only interface between them.
+
+Four things worth keeping:
+
+- **The deployed clone IS the working copy.** No second clone in a workspace, per the vault's
+  rule for a repo deployed at a fixed path outside a workspace. `~/.config/DankMaterialShell/
+  attention-providers` is outside the sandbox write boundary, so working on them needs
+  `/add-dir <that path>` — session-scoped, not a permanent `additionalDirectories` entry,
+  which is the vault's stated default and what MK asked for.
+- **`gitar` registers them** into the `workspace_extensions` group (dotfiles,
+  `oh-my-zsh-custom/gita.zsh`). The loop runs *after* the workspace pass so the group already
+  exists and keeps its position — gita fixes group order by add order.
+- **A fixed `provider.json`, not "any \*.json one level down".** A repo's `README.md`,
+  `package.json` or fixtures could otherwise be parsed and reported as broken providers.
+- **`$PROVIDER_DIR` is what makes a clone self-contained** — no symlink, no PATH entry. It has
+  no default, so a flat provider file using it fails loudly at spawn instead of quietly
+  resolving to some other binary of the same name.
+
+The thin repo earns its tests. `dms-attention-badges-tb` is one JSON file, and its suite
+asserts the bucket regex against real Thunderbird wording *and* that it rejects German
+phrasing, the connection-error notification, and summaries that merely contain the phrase —
+because that regex matches a **localized UI string** and fails silently, dumping every mail
+into `other`.
 
 ### Traps met building it
 

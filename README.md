@@ -33,22 +33,33 @@ cannot disagree.
 
 ## Providers
 
-Drop one JSON file per watched app into:
+Everything watched lives in `~/.config/DankMaterialShell/attention-providers/`. Nothing ships
+enabled: a fresh install badges nothing until you put a provider there.
+
+**The normal install is a git clone per provider**, each in its own subdirectory carrying a
+`provider.json` and whatever helper scripts it needs:
 
 ```sh
-mkdir -p ~/.config/DankMaterialShell/attention-providers
-```
-
-Working examples live in `providers/` in this repository. They are **examples, not
-defaults** — copy the ones you want:
-
-```sh
-cp providers/thunderbird.json ~/.config/DankMaterialShell/attention-providers/
+git clone git@github.com:mkoester/dms-attention-badges-tb.git ~/.config/DankMaterialShell/attention-providers/thunderbird
 ```
 
 ```sh
-dms ipc call attentionBadges reload
+dms ipc call attentionBadges rescan
 ```
+
+Two exist so far, and they are the worked examples of each kind:
+
+| Provider | Kind | Badges |
+|---|---|---|
+| [dms-attention-badges-tb](https://github.com/mkoester/dms-attention-badges-tb) | `notifications` | new mail per Thunderbird account |
+| [dms-attention-badges-herdr](https://github.com/mkoester/dms-attention-badges-herdr) | `command` | herdr panes whose agent is waiting |
+
+A **single flat `*.json` file** directly in that directory also works, for a provider that
+needs no scripts of its own. The subdirectory form is looked for at the fixed name
+`provider.json`, so a repo's `README.md`, `package.json` or fixtures can never be mistaken for
+a provider — and a subdirectory without one is simply not a provider, not an error.
+
+The directory name is yours; a provider's identity comes from `id` inside the file.
 
 ### Counting vs. state
 
@@ -149,19 +160,23 @@ Note that a command provider runs a command you named, from a file you wrote, on
 That is the same trust level as any DMS plugin (which is arbitrary QML), but it is worth
 saying out loud.
 
-**Give the command an absolute path, not a bare name.** The shell usually runs from a systemd
-user unit, whose `PATH` is the user manager's — typically `/usr/local/bin:/usr/bin:/bin` and
-**not** `~/.local/bin`. A command that works perfectly in your terminal can therefore fail to
-spawn here, and `$HOME`/`$XDG_*` expansion exists precisely so the file can say where it is
-without hardcoding your home directory.
+**Give the command a path, not a bare name.** The shell usually runs from a systemd user unit,
+whose `PATH` is the user manager's — typically `/usr/local/bin:/usr/bin:/bin` and **not**
+`~/.local/bin`. A command that works perfectly in your terminal can therefore fail to spawn
+here, with no output to explain it.
 
-`providers/herdr-attention` is a worked example: it calls `herdr api snapshot`, keeps the
-panes whose agent is `blocked` (`●`, waiting for your input) or `done` (`✓`, waiting for your
-review), drops the pane you are currently focused on, and prints the contract:
+`$PROVIDER_DIR` is the answer, and the reason a provider is a directory: it expands to the
+directory the provider file was read from, so a script shipped beside `provider.json` is
+addressable with no symlink and no `PATH` entry. Install is then `git clone` and nothing else.
 
-```sh
-ln -s "$PWD/providers/herdr-attention" ~/.local/bin/herdr-attention
-```
+It has **no default** — used by a flat provider file, which has no directory of its own, it
+expands to nothing and the spawn fails loudly rather than quietly finding some other binary of
+the same name.
+
+[dms-attention-badges-herdr](https://github.com/mkoester/dms-attention-badges-herdr) is the
+worked example: it calls `herdr api snapshot`, keeps the panes whose agent is `blocked` (`●`,
+waiting for your input) or `done` (`✓`, waiting for your review), drops the pane you are
+currently focused on, and prints the contract.
 
 ### Per-bucket resets
 
@@ -224,8 +239,15 @@ file is never silently skipped: that would look exactly like an app which simply
 notified yet.
 
 ```sh
+dms ipc call attentionBadges rescan
+```
+
+```sh
 dms ipc call attentionBadges reload
 ```
+
+`rescan` goes back to the filesystem — use it after cloning or deleting a provider. `reload`
+only re-parses what was already read, which is enough after editing a file in place.
 
 ```sh
 dms ipc call attentionBadges clear
@@ -252,11 +274,11 @@ hyprctl -j clients | grep -i class
 ./scripts/test
 ```
 
-Covers `Rules.js` — the provider format and its validation, matching, parsing, folding
-history, resets, orphan pruning — and `providers/herdr-attention`, including one end-to-end
-run of the real script through the real stdout contract. The shipped provider files are loaded
-from disk by the suite, so a broken preset fails the tests rather than failing silently in the
-bar.
+Covers `Rules.js` — the provider format and its validation, path expansion, matching, parsing,
+folding history, resets, orphan pruning — using inline fixtures of each provider kind. The
+providers themselves are tested in their own repos, which is where a locale-fragile regex or a
+CLI's response framing belongs; keeping copies here would give one provider two sources that
+drift.
 
 The notification fixtures are shape-faithful copies of real entries from
 `~/.cache/DankMaterialShell/notification_history.json` (addresses replaced), because a tidy

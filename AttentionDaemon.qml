@@ -89,10 +89,11 @@ PluginComponent {
         })
 
     function _rebuildTargets() {
-        // Sorted by filename so "first wins" on a duplicate id is deterministic
+        // Sorted by source so "first wins" on a duplicate id is deterministic
         // rather than depending on the order the directory happened to enumerate.
-        const files = Object.keys(providerData).sort().map(function (name) {
-            return { source: name, data: providerData[name] };
+        const files = Object.keys(providerData).sort().map(function (source) {
+            const entry = providerData[source];
+            return { source: source, dir: entry.dir, data: entry.data };
         });
         const built = Rules.buildTargets(files);
 
@@ -112,35 +113,53 @@ PluginComponent {
         }
     }
 
-    function _providerLoaded(fileName, text) {
+    // `source` is the path relative to the providers directory — `herdr.json` for
+    // a flat file, `herdr/provider.json` for a directory provider. It must NOT be
+    // the bare filename: every directory provider is called provider.json, so
+    // filenames collide the moment there is more than one clone.
+    function _providerLoaded(source, dir, text) {
         let data = null;
         try {
             data = JSON.parse(text);
         } catch (e) {
             let errs = Object.assign({}, providerLoadErrors);
-            errs[fileName] = "not valid JSON: " + String(e.message || e);
+            errs[source] = "not valid JSON: " + String(e.message || e);
             providerLoadErrors = errs;
             let d = Object.assign({}, providerData);
-            delete d[fileName];
+            delete d[source];
             providerData = d;
             _rebuildTargets();
             return;
         }
         let errs = Object.assign({}, providerLoadErrors);
-        delete errs[fileName];
+        delete errs[source];
         providerLoadErrors = errs;
         let d = Object.assign({}, providerData);
-        d[fileName] = data;
+        d[source] = { data: data, dir: dir || "" };
         providerData = d;
         _rebuildTargets();
     }
 
-    function _providerFailed(fileName, reason) {
+    function _providerFailed(source, reason) {
         let d = Object.assign({}, providerData);
-        delete d[fileName];
+        delete d[source];
         providerData = d;
         let errs = Object.assign({}, providerLoadErrors);
-        errs[fileName] = reason;
+        errs[source] = reason;
+        providerLoadErrors = errs;
+        _rebuildTargets();
+    }
+
+    // A subdirectory with no provider.json is simply not a provider — somebody's
+    // notes, a stray checkout. It gets a stage note so it is visible, and must
+    // NOT become an "invalid provider": reporting an unrelated directory as a
+    // broken provider is the same false accusation as the package.json incident.
+    function _notAProvider(source) {
+        let d = Object.assign({}, providerData);
+        delete d[source];
+        providerData = d;
+        let errs = Object.assign({}, providerLoadErrors);
+        delete errs[source];
         providerLoadErrors = errs;
         _rebuildTargets();
     }
@@ -199,7 +218,8 @@ PluginComponent {
 
             onLoaded: {
                 root._stage(providerFile.fileName, "loaded");
-                root._providerLoaded(providerFile.fileName, text());
+                // A flat file has no directory of its own, so no $PROVIDER_DIR.
+                root._providerLoaded(providerFile.fileName, "", text());
             }
             onLoadFailed: {
                 root._stage(providerFile.fileName, "load failed");
@@ -208,12 +228,74 @@ PluginComponent {
         }
     }
 
+    // ── Directory providers ─────────────────────────────────────────────────
+    // The normal install: each provider is a git clone in its own subdirectory,
+    // carrying provider.json plus whatever helper scripts it needs. A fixed
+    // filename rather than "any *.json one level down", so a repo's README,
+    // package.json or fixtures can never be mistaken for a provider.
+    readonly property string providerFileName: "provider.json"
+
+    FolderListModel {
+        id: providerDirs
+        folder: Paths.toFileUrl(root.providersDir)
+        showDirs: true
+        showFiles: false
+        showDotAndDotDot: false
+        showHidden: false
+        sortField: FolderListModel.Name
+    }
+
+    Instantiator {
+        model: providerDirs
+        delegate: FileView {
+            id: providerDirFile
+            required property string fileName
+            required property string filePath
+
+            readonly property string source: providerDirFile.fileName + "/" + root.providerFileName
+
+            path: root._isOurs(providerDirFile.filePath)
+                ? providerDirFile.filePath + "/" + root.providerFileName
+                : ""
+            watchChanges: true
+            blockLoading: false
+
+            Component.onCompleted: {
+                if (root._isOurs(providerDirFile.filePath))
+                    root._stage(providerDirFile.source, "delegate created, loading " + path);
+                else
+                    root._stage(providerDirFile.fileName,
+                        "STRAY — outside " + root.providersDir + ": " + providerDirFile.filePath);
+            }
+
+            onLoaded: {
+                root._stage(providerDirFile.source, "loaded");
+                root._providerLoaded(providerDirFile.source, providerDirFile.filePath, text());
+            }
+            // Absent provider.json is the ordinary case for a directory that is
+            // not a provider at all — a note, not a fault.
+            onLoadFailed: {
+                root._stage(providerDirFile.source, "no " + root.providerFileName + " — not a provider directory");
+                root._notAProvider(providerDirFile.source);
+            }
+        }
+    }
+
     // A late rescan. The provider files are read asynchronously and the folder
-    // model resolves asynchronously too, so a shell restart can leave the scan
-    // half-finished; nudging the model re-runs it without touching anything else.
+    // models resolve asynchronously too, so a shell restart can leave the scan
+    // half-finished; nudging both re-runs it without touching anything else.
     function rescan() {
+        const url = Paths.toFileUrl(root.providersDir);
         providerFolder.folder = "";
-        providerFolder.folder = Paths.toFileUrl(root.providersDir);
+        providerFolder.folder = url;
+        providerDirs.folder = "";
+        providerDirs.folder = url;
+    }
+
+    // $PROVIDER_DIR is per target, so every expansion needs the target's own
+    // directory folded into the environment.
+    function _envFor(target) {
+        return Object.assign({}, env, { PROVIDER_DIR: (target && target.dir) || "" });
     }
 
     function _persist() {
@@ -290,7 +372,7 @@ PluginComponent {
             id: visitsFile
             required property var modelData
 
-            path: Rules.expandPath(visitsFile.modelData.perBucketFile, root.env)
+            path: Rules.expandPath(visitsFile.modelData.perBucketFile, root._envFor(visitsFile.modelData))
             watchChanges: true
             blockLoading: false
 
@@ -392,7 +474,7 @@ PluginComponent {
 
             property Process proc: Process {
                 command: pollTimer.modelData.command.map(function (a) {
-                    return Rules.expandPath(a, root.env);
+                    return Rules.expandPath(a, root._envFor(pollTimer.modelData));
                 })
                 running: false
                 stdout: StdioCollector {
@@ -456,9 +538,10 @@ PluginComponent {
             // silently — report it rather than making the next person guess.
             const appId = ToplevelManager.activeToplevel?.appId ?? "";
             let lines = ["focused: " + (appId || "(none)")];
-            const folderState = ["Null", "Ready", "Loading"][providerFolder.status] || providerFolder.status;
+            const names = ["Null", "Ready", "Loading"];
             lines.push("providers dir: " + root.providersDir
-                + " (" + providerFolder.count + " *.json seen, model " + folderState + ")");
+                + " (" + providerFolder.count + " flat *.json, model " + (names[providerFolder.status] || providerFolder.status)
+                + "; " + providerDirs.count + " subdirs, model " + (names[providerDirs.status] || providerDirs.status) + ")");
             lines.push("providers: " + root.allTargets.length + " valid, " + root.invalidProviders.length + " invalid");
 
             // Every file the model enumerated, and how far it got. "0 valid,
@@ -467,8 +550,8 @@ PluginComponent {
             const stageKeys = Object.keys(root.providerStage).sort();
             for (let s = 0; s < stageKeys.length; s++)
                 lines.push("  " + stageKeys[s] + ": " + root.providerStage[stageKeys[s]]);
-            if (providerFolder.count > 0 && stageKeys.length === 0)
-                lines.push("  (model lists files but no delegate was ever created — try: dms ipc call attentionBadges rescan)");
+            if (providerFolder.count + providerDirs.count > 0 && stageKeys.length === 0)
+                lines.push("  (models list entries but no delegate was ever created — try: dms ipc call attentionBadges rescan)");
 
             for (let i = 0; i < root.allTargets.length; i++) {
                 const t = root.allTargets[i];
@@ -477,7 +560,7 @@ PluginComponent {
                 if (t.mode === "state")
                     how = "state via " + t.command.join(" ");
                 else if (t.perBucketFile && root.perBucketLive[t.id])
-                    how = "counted, clears per bucket via " + Rules.expandPath(t.perBucketFile, root.env);
+                    how = "counted, clears per bucket via " + Rules.expandPath(t.perBucketFile, root._envFor(t));
                 else if (t.command)
                     how = "counted via " + t.command.join(" ");
                 else
@@ -492,7 +575,7 @@ PluginComponent {
 
                 if (t.command) {
                     lines.push("    command: " + t.command.map(function (a) {
-                        return Rules.expandPath(a, root.env);
+                        return Rules.expandPath(a, root._envFor(t));
                     }).join(" ") + "  (every " + t.intervalSeconds + "s)");
 
                     const p = root.lastPoll[t.id];

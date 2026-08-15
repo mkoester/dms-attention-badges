@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit tests for Rules.js — the provider format and the parsing/state logic
-// behind the badges — plus the shipped command provider in providers/.
+// behind the badges.
 //
 // The notification fixtures below are SHAPE-FAITHFUL copies of real entries taken
 // from ~/.cache/DankMaterialShell/notification_history.json (only the mail
@@ -8,15 +8,10 @@
 // invented fixture would pass whatever the regex does, and the whole risk here is
 // that Thunderbird's real wording differs from what we remember it being.
 //
-// The SHIPPED provider files are loaded from disk rather than restated here, so
-// a broken preset fails this suite instead of failing silently in the bar.
+// The providers themselves live in their own repos and are tested there; this
+// suite covers the host, using inline fixtures of each provider kind.
 
-const fs = require("fs");
-const path = require("path");
 const R = require("../Rules.js");
-const HERDR = require("../providers/herdr-attention");
-
-const PROVIDERS_DIR = path.join(__dirname, "..", "providers");
 
 let failed = 0;
 let ran = 0;
@@ -35,9 +30,6 @@ function ok(name, cond) {
     check(name, !!cond, true);
 }
 
-function readProvider(file) {
-    return JSON.parse(fs.readFileSync(path.join(PROVIDERS_DIR, file), "utf8"));
-}
 
 // ── Path expansion ──────────────────────────────────────────────────────────
 // A provider file must never carry an absolute home path, so the core expands
@@ -55,25 +47,73 @@ check("an empty path stays empty", R.expandPath("", ENV), "");
 // A tilde only counts at the start — "a~/b" is a filename, not a home reference.
 check("a mid-string tilde is not expanded", R.expandPath("/a~/b", ENV), "/a~/b");
 
-// ── The shipped presets must parse ──────────────────────────────────────────
-const tbFile = readProvider("thunderbird.json");
-const herdrFile = readProvider("herdr.json");
+// $PROVIDER_DIR is what makes a provider a self-contained clone: a helper script
+// beside provider.json is addressable with no symlink and no dependence on PATH,
+// which the shell's systemd unit does not extend to ~/.local/bin.
+const PENV = { HOME: "/home/tester", PROVIDER_DIR: "/home/tester/.config/DankMaterialShell/attention-providers/herdr" };
+check("$PROVIDER_DIR expands", R.expandPath("$PROVIDER_DIR/herdr-attention", PENV),
+    "/home/tester/.config/DankMaterialShell/attention-providers/herdr/herdr-attention");
+check("${PROVIDER_DIR} expands", R.expandPath("${PROVIDER_DIR}/x", PENV),
+    "/home/tester/.config/DankMaterialShell/attention-providers/herdr/x");
+// No default, deliberately: a flat provider using it must produce a path that
+// cannot resolve, so it fails loudly at spawn rather than quietly finding some
+// other binary of the same name that happens to be on PATH.
+check("$PROVIDER_DIR has no default", R.expandPath("$PROVIDER_DIR/x", ENV), "/x");
+// $HOME must not eat the tail of the other variable names.
+check("$XDG_STATE_HOME is not mangled by $HOME", R.expandPath("$XDG_STATE_HOME", ENV), "/home/tester/.local/state");
+
+// ── Representative providers of each kind ───────────────────────────────────
+// Inline, not loaded from disk: the real provider files now live in their own
+// repos (dms-attention-badges-tb, dms-attention-badges-herdr) and are tested
+// there. Keeping copies here would give one provider two sources that drift.
+const tbFile = {
+    id: "thunderbird",
+    label: "Thunderbird",
+    icon: "mail",
+    source: {
+        kind: "notifications",
+        desktopEntry: "org.mozilla.Thunderbird",
+        bucket: {
+            source: "summary",
+            pattern: "^(\\S+@\\S+) received (\\d+) new messages?$",
+            nameGroup: 1,
+            countGroup: 2
+        },
+        fallbackBucket: "other"
+    },
+    reset: {
+        kind: "windowFocus",
+        windowClass: "org.mozilla.Thunderbird",
+        perBucketFile: "$XDG_STATE_HOME/thunderbird-attention-bridge/visits.json"
+    }
+};
+const herdrFile = {
+    id: "herdr",
+    label: "herdr",
+    icon: "terminal",
+    source: {
+        kind: "command",
+        command: ["$PROVIDER_DIR/herdr-attention", "--statuses", "blocked,done"],
+        intervalSeconds: 3,
+        mode: "state"
+    }
+};
 
 const tbParsed = R.parseProvider(tbFile);
-check("the Thunderbird preset parses", tbParsed.errors, []);
+check("the Thunderbird provider parses", tbParsed.errors, []);
 const herdrParsed = R.parseProvider(herdrFile);
-check("the herdr preset parses", herdrParsed.errors, []);
+check("the herdr provider parses", herdrParsed.errors, []);
 
 const tb = tbParsed.target;
 const herdr = herdrParsed.target;
 
 check("a notifications source counts", tb.mode, "count");
 check("a command source defaults to state", herdr.mode, "state");
-check("the preset keeps its window class", tb.windowClass, "org.mozilla.Thunderbird");
-check("the preset declares a per-bucket file", typeof tb.perBucketFile, "string");
+check("the provider keeps its window class", tb.windowClass, "org.mozilla.Thunderbird");
+check("the provider declares a per-bucket file", typeof tb.perBucketFile, "string");
 check("...which is not an absolute home path", tb.perBucketFile.indexOf("/home/"), -1);
 check("a state target has no window class", herdr.windowClass, undefined);
-check("the herdr preset polls every 3s", herdr.intervalSeconds, 3);
+check("the herdr provider polls every 3s", herdr.intervalSeconds, 3);
 
 // ── Provider validation ─────────────────────────────────────────────────────
 // Every rejection must name its reason: a provider that fails to load is shown
@@ -128,7 +168,7 @@ const built = R.buildTargets([
     { source: "thunderbird.json", data: tbFile },
     { source: "herdr.json", data: herdrFile }
 ]);
-check("both presets build", built.targets.map(t => t.id), ["thunderbird", "herdr"]);
+check("both providers build", built.targets.map(t => t.id), ["thunderbird", "herdr"]);
 check("nothing invalid", built.invalid, []);
 check("each target remembers its file", built.targets[0].source, "thunderbird.json");
 
@@ -150,6 +190,27 @@ ok("...and the winner is named in the error", dupes.invalid[0].errors[0].indexOf
 
 check("no files means no targets, not a crash", R.buildTargets([]), { targets: [], invalid: [] });
 check("undefined input does not throw", R.buildTargets(undefined), { targets: [], invalid: [] });
+
+// A directory provider carries the directory it was read from, so $PROVIDER_DIR
+// can resolve. A flat file has none — that is what makes the no-default above
+// the safe choice rather than an oversight.
+const dirBuilt = R.buildTargets([
+    { source: "herdr/provider.json", dir: "/p/herdr", data: herdrFile },
+    { source: "thunderbird.json", data: tbFile }
+]);
+check("a directory provider records its directory", dirBuilt.targets[0].dir, "/p/herdr");
+check("a flat provider records none", dirBuilt.targets[1].dir, "");
+check("the recorded directory resolves the command", R.expandPath(dirBuilt.targets[0].command[0], { HOME: "/h", PROVIDER_DIR: dirBuilt.targets[0].dir }), "/p/herdr/herdr-attention");
+
+// Two clones both called provider.json must not collide. The daemon keys by the
+// source PATH for exactly this reason; if it keyed by filename these would be
+// one entry and the second provider would vanish with no error anywhere.
+const twoClones = R.buildTargets([
+    { source: "herdr/provider.json", dir: "/p/herdr", data: herdrFile },
+    { source: "thunderbird/provider.json", dir: "/p/thunderbird", data: tbFile }
+]);
+check("two directory providers both build", twoClones.targets.map(t => t.id), ["herdr", "thunderbird"]);
+check("...with their own directories", twoClones.targets.map(t => t.dir), ["/p/herdr", "/p/thunderbird"]);
 
 // ── The command stdout contract ─────────────────────────────────────────────
 // Every failure must be distinguishable from an empty-but-valid result, because
@@ -219,106 +280,10 @@ const attention = notif({ appName: "notify-send", summary: "claude needs attenti
 check("herdr is state-mode", herdr.mode, "state");
 check("a state target ignores notifications", R.matches(herdr, attention), false);
 
-// ── The herdr command provider ──────────────────────────────────────────────
-// Snapshot fixture: field names and the agent_status vocabulary come from the
-// bundled schema (`herdr api schema --json`, SessionSnapshot / AgentInfo /
-// AgentStatus). The VALUES are invented — no live snapshot was ever captured, so
-// treat a field that turns out to be shaped differently as expected, not a bug.
-const snapshot = {
-    focused_pane_id: "p9",
-    workspaces: [
-        { workspace_id: "w1", label: "homelab" },
-        { workspace_id: "w2", label: "extensions" }
-    ],
-    tabs: [
-        { tab_id: "t3", number: 3 },
-        { tab_id: "t4", number: 4 },
-        { tab_id: "t9", number: 9 }
-    ],
-    agents: [
-        { pane_id: "p1", workspace_id: "w1", tab_id: "t3", agent_status: "blocked", display_agent: "claude" },
-        { pane_id: "p2", workspace_id: "w1", tab_id: "t4", agent_status: "working", display_agent: "claude" },
-        { pane_id: "p3", workspace_id: "w2", tab_id: "t4", agent_status: "blocked", agent: "codex" },
-        { pane_id: "p4", workspace_id: "w1", tab_id: "t3", agent_status: "done", display_agent: "claude" },
-        // Blocked, but you are looking at it right now.
-        { pane_id: "p9", workspace_id: "w1", tab_id: "t9", agent_status: "blocked", display_agent: "claude" }
-    ]
-};
-
-// MEASURED 2026-08-11: `herdr api snapshot` prints the socket response envelope,
-// not a bare SessionSnapshot. Writing against the schema alone gave a parser that
-// parsed cleanly and found zero agents on every poll — the badge sat at 0 and
-// nothing anywhere reported an error. This is the regression test for that.
-const enveloped = { id: "cli:api:snapshot", result: { snapshot: snapshot } };
-check("the CLI envelope is unwrapped", HERDR.unwrapSnapshot(enveloped), snapshot);
-check("a bare snapshot still works", HERDR.unwrapSnapshot(snapshot), snapshot);
-check("a result without the snapshot wrapper works", HERDR.unwrapSnapshot({ result: snapshot }), snapshot);
-check("an unrecognisable payload is null, not a silent empty", HERDR.unwrapSnapshot({ id: "x", result: {} }), null);
-check("enveloped input produces the same buckets as bare", HERDR.herdrBuckets(enveloped), HERDR.herdrBuckets(snapshot));
-check("enveloped input is not empty", Object.keys(HERDR.herdrBuckets(enveloped)).length, 3);
-
-const hb = HERDR.herdrBuckets(snapshot);
-check("blocked and done both badge, marked apart", Object.keys(hb).sort(), [
-    "● extensions · 4 · codex",
-    "● homelab · 3 · claude",
-    "✓ homelab · 3 · claude"
-]);
-check("the focused pane is excluded", hb["● homelab · 9 · claude"], undefined);
-check("'working' does not badge", Object.keys(hb).length, 3);
-check("labels match herdr's own notification shape", hb["● homelab · 3 · claude"], 1);
-check("falls back to agent when display_agent is absent", hb["● extensions · 4 · codex"], 1);
-check("an empty snapshot yields nothing", HERDR.herdrBuckets({ agents: [] }), {});
-check("a missing snapshot does not throw", HERDR.herdrBuckets(null), {});
-
-// The watched statuses are configurable through the provider file's command
-// arguments — blocked-only must work, and must differ from the default, or the
-// argument would be untestable.
-const blockedOnly = HERDR.herdrBuckets(snapshot, ["blocked"]);
-check("blocked-only drops the done entry", Object.keys(blockedOnly).length, 2);
-check("...and keeps the blocked ones", blockedOnly["● homelab · 3 · claude"], 1);
-check("an empty status list falls back to the default", Object.keys(HERDR.herdrBuckets(snapshot, [])).length, 3);
-
-check("--statuses is parsed", HERDR.parseArgs(["--statuses", "blocked"]).statuses, ["blocked"]);
-check("--statuses splits and trims", HERDR.parseArgs(["--statuses", "blocked, done"]).statuses, ["blocked", "done"]);
-check("no arguments means the default", HERDR.parseArgs([]).statuses, HERDR.HERDR_ATTENTION);
-
-// The diagnostic must describe what was SEEN, not just the verdict — an empty
-// bucket set is what "nothing is waiting" looks like AND what a wrong field name
-// looks like, so the histogram is the only thing that separates them.
-const described = HERDR.describe(snapshot, ["blocked", "done"], hb);
-ok("the diagnostic counts agents", described.indexOf("5 agents") !== -1);
-ok("...reports the status vocabulary as it really came back", described.indexOf("blocked=3 done=1 working=1") !== -1);
-ok("...names the focused pane that was excluded", described.indexOf("focused=p9") !== -1);
-ok("...and the resulting bucket count", described.indexOf("3 buckets") !== -1);
-// The case the diagnostic exists for: nothing waiting, but agents present.
-ok("an empty result still reports what was seen", HERDR.describe({ agents: [{ agent_status: "idle" }] }, ["blocked"], {}).indexOf("1 agents [idle=1]") !== -1);
-ok("a genuinely empty snapshot says so", HERDR.describe({ agents: [] }, ["blocked"], {}).indexOf("(no agents)") !== -1);
-
-// End to end through the real entry point: the script reads a captured payload,
-// prints the contract, and the core parses it. This is the join the two halves
-// meet at, and it is the one thing neither test above exercises.
-(function () {
-    const cp = require("child_process");
-    const tmp = path.join(process.env.TMPDIR || "/tmp", "attention-snapshot-" + process.pid + ".json");
-    fs.writeFileSync(tmp, JSON.stringify(enveloped));
-    const run = cp.spawnSync(
-        path.join(PROVIDERS_DIR, "herdr-attention"),
-        ["--snapshot", tmp],
-        { encoding: "utf8" }
-    );
-    fs.unlinkSync(tmp);
-
-    check("the script exits 0 on a good snapshot", run.status, 0);
-    const parsed = R.parseCommandOutput(run.stdout);
-    check("the script's real output satisfies the contract", parsed.error, null);
-    check("...and carries the same buckets", parsed.buckets, hb);
-
-    // stdout is the contract; a diagnostic printed there would corrupt it, and
-    // the corruption would be invisible until a badge silently stopped working.
-    check("stdout is exactly one JSON line", run.stdout.trim().split("\n").length, 1);
-    ok("stdout carries no diagnostic text", run.stdout.indexOf("agents [") === -1);
-    ok("the diagnostic goes to stderr", run.stderr.indexOf("agents [") !== -1);
-})();
+// ── A state target's buckets come from its command, not from here ──────────
+// The herdr extraction that used to live in this repo moved to
+// dms-attention-badges-herdr and is tested there. What the core must still
+// guarantee is that a state target is never fed by the notification stream.
 
 // ── Folding history ─────────────────────────────────────────────────────────
 const T = [tb, herdr];

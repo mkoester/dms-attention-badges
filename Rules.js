@@ -35,6 +35,14 @@ var DEFAULT_INTERVAL_SECONDS = 5;
 // must never carry an absolute home path — they are meant to be copied between
 // machines and users — so the expansion happens here, from an explicit env
 // object, which also makes it testable without touching the real environment.
+//
+// PROVIDER_DIR is the directory the provider file itself was read from, and it
+// is what lets a provider be a self-contained git clone: a helper script shipped
+// beside provider.json is addressable without a symlink and without depending on
+// PATH — which the shell's systemd unit does not extend to ~/.local/bin anyway.
+// It has no default: a file using it outside a directory provider expands to the
+// empty string, which fails loudly at spawn rather than silently finding some
+// other binary of the same name.
 function expandPath(path, env) {
     if (typeof path !== "string" || path === "")
         return "";
@@ -42,6 +50,7 @@ function expandPath(path, env) {
     const home = e.HOME || "";
     const vars = {
         HOME: home,
+        PROVIDER_DIR: e.PROVIDER_DIR || "",
         XDG_STATE_HOME: e.XDG_STATE_HOME || (home ? home + "/.local/state" : ""),
         XDG_CONFIG_HOME: e.XDG_CONFIG_HOME || (home ? home + "/.config" : ""),
         XDG_CACHE_HOME: e.XDG_CACHE_HOME || (home ? home + "/.cache" : "")
@@ -202,6 +211,9 @@ function buildTargets(files) {
         }
         seen[result.target.id] = source;
         result.target.source = source;
+        // The directory the file was read from, for $PROVIDER_DIR. Empty for a
+        // flat provider file, which has no directory of its own to point at.
+        result.target.dir = (file && file.dir) || "";
         targets.push(result.target);
     });
 
