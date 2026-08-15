@@ -55,6 +55,13 @@ both memory and the online docs. `PLUGINS/` in it ships worked examples, a
     `Error` counted zero, and three files "passed". **A tool that rejected the invocation
     reads exactly like a tool that found nothing.** Check the exit code, and run a
     deliberately broken file as a control before believing any gate.
+- **`parseProvider` returns `{target, errors}` — an array named `errors`, not a singular
+  `error`.** A test written as `check(…, parsed.error || "", "")` compares `undefined` to
+  `""`, passes for *every* input, and reads as a green validation check; a deliberately
+  invalid provider sailed through it (2026-08-15). `target` is `null` on failure, which is
+  the other signal to assert. Same family as the `qmllint --bare` trap below — the control
+  run is what caught both, and it is the step most easily skipped when the check "obviously"
+  works.
 - **`Rules.js` is plain JS on purpose** — no `.pragma library`, and a guarded
   `module.exports` tail so `scripts/test` can `require()` it under node. That is the only
   automated coverage this repo has; keep logic out of the QML so it stays that way.
@@ -285,10 +292,17 @@ de-personalised. `plugin.json` was checked field-by-field against the shipped
 broken copy as the control, because `python3-jsonschema` is not installed and pypi is
 unreachable from a sandboxed session.
 
-**What is left, and both need a human:** a **screenshot** of the bar with live badges (the
-registry requires a reachable URL for one), and **making the three repos public** — the
-registry entry is a public GitHub URL that `dms plugins install` clones, and a private repo
-fails the registry's own `validate_links.py`.
+**Screenshot: provided 2026-08-15** and committed at `docs/screenshot.png`, also embedded in
+`README.md`. Two caveats recorded rather than fixed, both in `docs/README.md`: it is **507×233**,
+and the registry letterboxes into a 960×540 card, so it is upscaled ~1.9× and looks soft; and
+the mail addresses are **blurred**, which in a gallery listing advertises that something is
+hidden at exactly the spot where the per-account split is the feature. Regenerating with fake
+data beats redacting real data — `clear`, then the `notify-send` line 2–3× with `@example.com`
+addresses.
+
+**What is left needs a human: making the three repos public.** The registry entry is a public
+GitHub URL that `dms plugins install` clones, and `validate_links.py` fetches both that repo
+and the screenshot, so neither network check can pass before the flip.
 
 ## The provider framework (2026-08-15)
 
