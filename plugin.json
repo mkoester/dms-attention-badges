@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "author": "Mirko Köster",
     "type": "composite",
-    "capabilities": ["daemon", "dankbar-widget"],
+    "capabilities": ["daemon", "dankbar-widget", "ipc"],
     "icon": "notifications_active",
     "components": {
         "daemon": "./AttentionDaemon.qml",
@@ -13,8 +13,10 @@
     },
     "settings": "./AttentionSettings.qml",
     "requires_dms": ">=1.5.0",
+    "dependencies": [],
     "permissions": [
         "settings_read",
-        "settings_write"
+        "settings_write",
+        "process"
     ]
 }

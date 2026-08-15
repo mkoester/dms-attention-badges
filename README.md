@@ -6,6 +6,8 @@ Focus the app's window and its badge clears.
 Not an unread counter. A mailbox with 4000 unread messages shows nothing until something
 new arrives.
 
+![Two badges in the DankBar, and the popout listing what is waiting per app and per bucket](docs/screenshot.png)
+
 The plugin knows **how** to watch things and nothing about **what**. Every watched app is a
 small JSON file you drop in a directory — so out of the box it badges nothing, and what it
 badges is entirely yours.
@@ -40,7 +42,7 @@ enabled: a fresh install badges nothing until you put a provider there.
 `provider.json` and whatever helper scripts it needs:
 
 ```sh
-git clone git@github.com:mkoester/dms-attention-badges-tb.git ~/.config/DankMaterialShell/attention-providers/thunderbird
+git clone https://github.com/mkoester/dms-attention-badges-tb.git ~/.config/DankMaterialShell/attention-providers/thunderbird
 ```
 
 ```sh
@@ -53,6 +55,10 @@ Two exist so far, and they are the worked examples of each kind:
 |---|---|---|
 | [dms-attention-badges-tb](https://github.com/mkoester/dms-attention-badges-tb) | `notifications` | new mail per Thunderbird account |
 | [dms-attention-badges-herdr](https://github.com/mkoester/dms-attention-badges-herdr) | `command` | herdr panes whose agent is waiting |
+
+**[PROVIDER-IDEAS.md](PROVIDER-IDEAS.md)** is the answer to *what should I point this at?* —
+the test for whether something belongs here at all, worked examples of each kind, the
+anti-patterns, and what the format still cannot express.
 
 A **single flat `*.json` file** directly in that directory also works, for a provider that
 needs no scripts of its own. The subdirectory form is looked for at the fixed name
@@ -195,9 +201,10 @@ charge of the reset.
 
 Counting is unaffected either way. For Thunderbird,
 [thunderbird-attention-bridge](https://github.com/mkoester/thunderbird-attention-bridge)
-is such a helper — it reports which accounts you opened and nothing else, because the
-notification counts are already accurate and a second source of truth for the same number is
-a liability.
+is such a helper (**not published yet**) — it reports which accounts you opened and nothing
+else, because the notification counts are already accurate and a second source of truth for
+the same number is a liability. The format above is the entire interface, so any helper that
+writes that file works.
 
 ### Paths
 
@@ -207,17 +214,30 @@ are expanded, in both `perBucketFile` and command arguments.
 
 ## Install
 
+From the plugin registry:
+
+```sh
+dms plugins install attentionBadges
+```
+
+Or from a checkout, which is what you want while writing providers — the plugin directory
+may be a symlink:
+
+```sh
+git clone https://github.com/mkoester/dms-attention-badges.git
+```
+
 ```sh
 mkdir -p ~/.config/DankMaterialShell/plugins
 ```
 
 ```sh
-ln -s "$PWD" ~/.config/DankMaterialShell/plugins/attentionBadges
+ln -s "$PWD/dms-attention-badges" ~/.config/DankMaterialShell/plugins/attentionBadges
 ```
 
-The directory does not exist on a machine that has never installed a plugin, and DMS points
-its directory watcher at it *at startup* — so if `dms plugins list` does not show the plugin
-after creating it, `dms restart`.
+The plugins directory does not exist on a machine that has never installed a plugin, and DMS
+points its directory watcher at it *at startup* — so if `dms plugins list` does not show the
+plugin after creating it, `dms restart`.
 
 Then enable it in Settings → Plugins, and add the widget in **Settings → DankBar → Widgets**
 (Left / Center / Right section). A plugin whose widget is greyed out there with *"Plugin is
@@ -280,6 +300,10 @@ providers themselves are tested in their own repos, which is where a locale-frag
 CLI's response framing belongs; keeping copies here would give one provider two sources that
 drift.
 
+It also checks `plugin.json` against the schema DMS ships, that every QML file the manifest
+names exists, and that `docs/registry-entry.json` still agrees with it — the registry
+validates that pair itself, but only in a PR, which is too late to find out.
+
 The notification fixtures are shape-faithful copies of real entries from
 `~/.cache/DankMaterialShell/notification_history.json` (addresses replaced), because a tidy
 invented fixture would pass whatever the regex happens to do.
@@ -301,3 +325,7 @@ QML is validated only by loading it in a running shell.
   `Services/NotificationService.qml`: `doNotDisturb` gates only the popup, while history is
   fed from a separate condition. The real blind spot is the freedesktop `transient` hint,
   which keeps a notification out of history entirely, DND or not.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

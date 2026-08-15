@@ -398,5 +398,80 @@ check("matching is case-insensitive", R.targetForWindowClass(T, "ORG.MOZILLA.THU
 check("an unwatched class matches nothing", R.targetForWindowClass(T, "firefox"), null);
 check("an empty class matches nothing", R.targetForWindowClass(T, ""), null);
 
+// ── The manifest, and the registry entry that must agree with it ────────────
+// plugin.json is the one file whose breakage stops the plugin loading at all,
+// and nothing else here reads it. The registry additionally validates that its
+// entry's id and name match this file *exactly* — a check that only runs in a
+// PR against a public repo, so the offline half of it belongs here, where a
+// version bump that forgets docs/registry-entry.json fails immediately.
+const fs = require("fs");
+const path = require("path");
+const repo = path.join(__dirname, "..");
+const manifest = JSON.parse(fs.readFileSync(path.join(repo, "plugin.json"), "utf8"));
+const entry = JSON.parse(fs.readFileSync(path.join(repo, "docs/registry-entry.json"), "utf8"));
+
+// Required fields and patterns from the schema DMS ships at
+// /usr/share/quickshell/dms/PLUGINS/plugin-schema.json.
+for (const field of ["id", "name", "description", "version", "author", "type", "capabilities"])
+    ok(`manifest has ${field}`, manifest[field] !== undefined);
+ok("manifest id is camelCase, letters and digits only", /^[a-zA-Z][a-zA-Z0-9]*$/.test(manifest.id));
+ok("manifest version is semver", /^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$/.test(manifest.version));
+ok("manifest type is a known surface kind",
+    ["widget", "daemon", "launcher", "desktop", "composite"].indexOf(manifest.type) !== -1);
+for (const p of manifest.permissions || [])
+    ok(`permission ${p} is one the schema defines`,
+        ["settings_read", "settings_write", "process", "network"].indexOf(p) !== -1);
+// A command provider spawns a process, so the manifest has to say so.
+ok("manifest declares the process permission", (manifest.permissions || []).indexOf("process") !== -1);
+
+// Every QML file the manifest names must exist — a rename that misses one
+// produces a plugin that loads with a silently missing surface.
+for (const [surface, rel] of Object.entries(manifest.components || {})) {
+    ok(`components.${surface} is a ./*.qml path`, /^\.\/.*\.qml$/.test(rel));
+    ok(`components.${surface} exists on disk`, fs.existsSync(path.join(repo, rel)));
+}
+ok("the settings component exists on disk", fs.existsSync(path.join(repo, manifest.settings)));
+
+// The registry's own required set (.github/generate.py), plus the screenshot
+// that only .github/validate_links.py enforces.
+for (const field of ["id", "name", "capabilities", "category", "repo", "author",
+                     "description", "dependencies", "compositors", "distro", "screenshot"])
+    ok(`registry entry has ${field}`, entry[field] !== undefined);
+check("registry id matches the manifest", entry.id, manifest.id);
+check("registry name matches the manifest", entry.name, manifest.name);
+ok("registry id is camelCase", /^[a-z][a-zA-Z0-9]*$/.test(entry.id));
+// The screenshot has to be a URL we control, or the entry breaks when someone
+// else's host goes away — and the registry refuses an unreachable one.
+ok("the screenshot lives in this repo", entry.screenshot.startsWith(entry.repo.replace(
+    "https://github.com/", "https://raw.githubusercontent.com/")));
+// ...and is actually committed, since the registry fetches that URL and rejects
+// an entry whose screenshot 404s — a check that only runs once the PR is open.
+const shot = entry.screenshot.split("/").slice(6).join("/");
+ok(`the screenshot file ${shot} exists`, fs.existsSync(path.join(repo, shot)));
+
+// ── The documented example providers ────────────────────────────────────────
+// PROVIDER-IDEAS.md is the only place this repo still ships provider files, and
+// a documented example that no longer validates is worse than none: it is copied
+// verbatim by whoever reads it. Parsed, not executed — running them would make
+// the suite depend on jq and on what happens to be in /etc.
+const ideas = fs.readFileSync(path.join(repo, "PROVIDER-IDEAS.md"), "utf8");
+const blocks = [...ideas.matchAll(/```json\n([\s\S]*?)```/g)].map(m => m[1]);
+ok("PROVIDER-IDEAS.md still carries example providers", blocks.length >= 3);
+for (const block of blocks) {
+    let obj = null;
+    try {
+        obj = JSON.parse(block);
+    } catch (e) {
+        check(`a PROVIDER-IDEAS.md block parses as JSON (${e.message})`, false, true);
+        continue;
+    }
+    // parseProvider reports `errors` (an array) and a null `target` — reading a
+    // singular `.error` here is undefined, compares equal to "", and produces an
+    // assertion that cannot fail. It was written that way first.
+    const parsed = R.parseProvider(obj, "PROVIDER-IDEAS.md");
+    check(`documented provider ${obj.id} validates`, parsed.errors, []);
+    ok(`documented provider ${obj.id} yields a target`, parsed.target !== null);
+}
+
 console.log(`${ran - failed}/${ran} assertions passed`);
 process.exit(failed === 0 ? 0 : 1);

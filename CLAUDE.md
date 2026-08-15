@@ -5,6 +5,17 @@ what the plugin does, how to install it, its known limits and the provider roadm
 file holds what the next session needs and the README should not carry: the DMS plugin API
 as *measured*, and the traps found while writing it.
 
+It is kept in the public repo deliberately — the API table below was read out of a running
+shell rather than out of documentation, so it is probably useful to anyone else writing a
+DMS plugin, whether or not they care about badges.
+
+`PROVIDER-IDEAS.md` is the third document and answers the question a host with no providers
+inevitably raises: *what do I point it at?* It carries the fit test, the anti-patterns, and —
+the part to keep honest — a list of what the format still cannot express, which is the real
+roadmap. Its two worked `command` examples were run end to end through `parseProvider` and
+`parseCommandOutput`, in both the empty and the populated branch; anything in it that was
+*not* measured says so.
+
 Everything below was read out of the shipped shell at `/usr/share/quickshell/dms`
 (`dms-shell 1.5.3-1`, `quickshell 0.3.0-2.1`) — that tree is the primary source and beats
 both memory and the online docs. `PLUGINS/` in it ships worked examples, a
@@ -167,7 +178,7 @@ the release notes — it does nothing useful:
 | enablement | gate is `mail.biff.show_tray_icon_always`, **default `false`** (`defaults/pref/mailnews.js:372`), **no UI** — the Settings checkbox drives `mail.biff.show_tray_icon`, which `MailGlue.sys.mjs:1525` registers only `if (AppConstants.platform === "win")` |
 
 So an icon exists and carries no information. Flip the pref in about:config to see it.
-Measured on `mkDell` the same day: `busctl --user get-property org.kde.StatusNotifierWatcher
+Measured the same day: `busctl --user get-property org.kde.StatusNotifierWatcher
 /StatusNotifierWatcher org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems` → `as 0`.
 The watcher is up (the property read succeeded, so Quickshell is hosting it) and **nothing on
 the machine registers a tray item at all** — TB included, as the pref default predicts.
@@ -203,46 +214,56 @@ have to be reimplemented against the Hyprland IPC socket in each app.
 ### What a tray app would actually buy
 
 One real thing: **portability off DMS**. If the shell is ever abandoned, a tray app survives
-and this plugin does not. Against that: the whole fleet is Hyprland+DMS, the shared baseline
-(`workstation-private/shared/dms/base.json`) already lists `attentionBadges` in the bar, and
-the registry (TODO #2) is the distribution path.
+and this plugin does not. Against that: every machine this runs on is Hyprland+DMS and
+provisions the plugin from a shared DMS baseline, and the registry is the distribution path.
 
 The other argument — *two unrelated concerns should not be one plugin* — is already answered
 by the provider model: `notifications`, `herdr` and the bridge are separate providers behind
 one renderer. Splitting them into processes buys separation we have and costs the shared
 focus/reset machinery.
 
-**Net effect of the research: it strengthens TODO #2 and #3**, because there is now
+**Net effect of the research: it strengthens the case for publishing**, because there is now
 demonstrably no existing tool that does *new since you last looked*, per account, on Wayland.
+
+### The nearest neighbours in the registry (2026-08-15)
+
+Checked before publishing, because "isn't this just X?" is the first question a reviewer asks.
+Of ~290 entries the closest is **Interval Command** (`corcoran/dms-interval-command`) — *"run a
+command on a custom interval and display its output in the bar"*. It is the same poll loop and
+stops there: output is text, not buckets; there is no notification source, no focus reset, and
+no since-you-last-looked semantics, which is the entire idea here. The mail-shaped ones
+(`mailChecker`, `dankmailUnread`) and the forge-shaped ones (`githubNotifier`, `gitlabNotifier`,
+`githubInbox`) are each **one hard-wired service**, which is precisely what the provider model
+replaces — and any of them is expressible here as a JSON file. Nothing found does both halves.
 
 ## TODO
 
-**1. Fleet install — the repo has to move to `~/src` first (2026-08-12).** The shared DMS
-baseline (`workstation-private/shared/dms/base.json`) now lists `attentionBadges` in the bar,
-so every machine expects the plugin, but it only exists inside `workspace_extensions` on
-`mkDell`. Installing it fleet-wide needs a **fixed path that does not depend on a workspace
-being cloned**, which is exactly the vault's rule: *"a repo whose deployment needs a clone at
-a fixed path outside the workspace is outside-tree, not nested — and gets no second clone"*
-([ai-workspaces](../../okf/practices/ai-workspaces.md#adding-a-member-to-an-existing-workspace)).
-So: move to `~/src/dms-attention-badges`, reference it from `workspace_extensions` via
-`.code-workspace` + `additionalDirectories` exactly as `dotfiles` is, and have `install.sh`
-clone it and symlink it into `~/.config/DankMaterialShell/plugins/attentionBadges` under
-`DF_DMS`. **Not done — MK to confirm the move.**
-
-**2. Publishing to the DMS registry — possible, and the path is concrete.** The registry is a
+**1. Publishing to the DMS registry — possible, and the path is concrete.** The registry is a
 git repo, `github.com/AvengeMedia/dms-plugin-registry` (85 stars, active), not a web form:
 fork it, add `plugins/mkoester-attention-badges.json` naming this repo, open a PR. Its
 `CONTRIBUTING.md` requires `id` and `name` to match `plugin.json` exactly — `attentionBadges`
 and `Attention Badges` already satisfy the id rules (camelCase, letters only). `dms plugins
 install` then clones the repo named in that entry, and the API is `api.danklinux.com/plugins`.
 
+**The entry is written and lives at `docs/registry-entry.json`** — copy it into a fork as
+`plugins/mkoester-attention-badges.json`. It is kept in-repo so a version bump can be diffed
+against what was submitted, and `scripts/test` asserts its `id`/`name` still match
+`plugin.json`, which is the one thing the registry rejects a PR over and only checks in CI.
+
 Re-checked 2026-08-15 against `CONTRIBUTING.md` — still accurate, and there is more than was
 noted. The entry additionally **requires** `capabilities`, `category`, `compositors`, `distro`
 and a reachable `screenshot` URL; `path` is optional and would allow a monorepo. The registry
 ships **local validators to run before opening the PR** — `pip install jinja2 requests`, then
-`python3 .github/generate.py --validate` and `python3 .github/validate_links.py` — which check
-JSON syntax, required fields, reachable URLs, and that `id`/`name` match `plugin.json`. Every
-plugin also gets a standardised 960×540 preview card at `api.danklinux.com/previews/{id}`,
+`python3 .github/generate.py --validate` and `python3 .github/validate_links.py`. Read
+2026-08-15 rather than taken from `CONTRIBUTING.md`, because they **split differently than the
+prose suggests**: `generate.py` checks JSON syntax and its own required-field list, which does
+**not** include `screenshot`; everything else is `validate_links.py` — the screenshot's
+presence *and* reachability, the camelCase rule, and the `id`/`name` match, which it makes by
+fetching `plugin.json` from `raw.githubusercontent.com`. **Both network checks fail while the
+repo is private**, so a green `generate.py` alone means very little. The offline half of the
+same comparison is in `scripts/test`, which needs no network at all.
+
+Every plugin also gets a standardised 960×540 preview card at `api.danklinux.com/previews/{id}`,
 which letterboxes any aspect ratio over a blurred backdrop, so the screenshot does not need
 cropping — capture it on the default dank purple theme with real data visible.
 
@@ -253,15 +274,25 @@ the key, and its catalog is loaded *only* from `translations/poexports` inside t
 translations**, so every plugin-specific string stays English forever, translated or not.
 Wrapping is worth it only for terms DMS's own catalog already carries (`Add`, `Enabled`).
 
-**3. ~~De-personalise before publishing~~ — DONE 2026-08-15, and it went further than
-de-personalising.** See § "The provider framework" below. What remains of this item: the
-registry entry wants `category`, `compositors`, `distro` and a **screenshot**, so one is
-needed of the bar with a couple of live badges; and **the repo must be public** (it is
-private), since the registry entry is a public GitHub URL that `dms plugins install` clones.
+**2. ~~De-personalise before publishing~~ — DONE 2026-08-15, and it went further than
+de-personalising.** See § "The provider framework" below.
+
+**3. Publish-readiness pass — DONE 2026-08-15.** MIT `LICENSE`, `plugin.json` at 1.0.0 with
+`process` in `permissions` (a `command` provider spawns one, and the schema's enum has the
+term), HTTPS clone URLs in the README, both install routes documented, and this file
+de-personalised. `plugin.json` was checked field-by-field against the shipped
+`plugin-schema.json` — required keys, every `pattern`, every `enum` — with a deliberately
+broken copy as the control, because `python3-jsonschema` is not installed and pypi is
+unreachable from a sandboxed session.
+
+**What is left, and both need a human:** a **screenshot** of the bar with live badges (the
+registry requires a reachable URL for one), and **making the three repos public** — the
+registry entry is a public GitHub URL that `dms plugins install` clones, and a private repo
+fails the registry's own `validate_links.py`.
 
 ## The provider framework (2026-08-15)
 
-MK's reframe, and it is the thing to preserve: **the plugin is a host, not a bundle of two
+The reframe to preserve: **the plugin is a host, not a bundle of two
 features.** It knows *how* to watch things and nothing about *what*. Thunderbird and herdr are
 two ordinary providers, and nothing in the QML or in `Rules.js` names either of them.
 
@@ -292,8 +323,8 @@ the format's reference; what belongs here is why it is shaped this way:
 
 ### The split (2026-08-15)
 
-Each provider is now its own **private** repo, cloned into the scan directory. The plugin repo
-ships no provider at all.
+Each provider is now its own repo, cloned into the scan directory. The plugin repo ships no
+provider at all.
 
 | Repo | Cloned to | Kind |
 |---|---|---|
@@ -303,16 +334,11 @@ ships no provider at all.
 `thunderbird-attention-bridge` **stays its own repo**, unchanged — the tb provider works with
 no bridge at all, and `visits.json` remains the only interface between them.
 
-Four things worth keeping:
+Three things worth keeping:
 
-- **The deployed clone IS the working copy.** No second clone in a workspace, per the vault's
-  rule for a repo deployed at a fixed path outside a workspace. `~/.config/DankMaterialShell/
-  attention-providers` is outside the sandbox write boundary, so working on them needs
-  `/add-dir <that path>` — session-scoped, not a permanent `additionalDirectories` entry,
-  which is the vault's stated default and what MK asked for.
-- **`gitar` registers them** into the `workspace_extensions` group (dotfiles,
-  `oh-my-zsh-custom/gita.zsh`). The loop runs *after* the workspace pass so the group already
-  exists and keeps its position — gita fixes group order by add order.
+- **The deployed clone IS the working copy** — a provider repo is cloned straight into the
+  scan directory and edited there, with no second checkout anywhere. That is what makes
+  `$PROVIDER_DIR` sufficient and the install a bare `git clone`.
 - **A fixed `provider.json`, not "any \*.json one level down".** A repo's `README.md`,
   `package.json` or fixtures could otherwise be parsed and reported as broken providers.
 - **`$PROVIDER_DIR` is what makes a clone self-contained** — no symlink, no PATH entry. It has
@@ -355,10 +381,11 @@ into `other`.
   `/usr/lib/systemd/user/dms.service`, which sets no `Environment=PATH`, and there is no
   `PATH` in `~/.config/environment.d/` — so the unit gets the *user manager's* `PATH`, which
   does not include `~/.local/bin`, and a bare `herdr-attention` cannot be found even though
-  the symlink is there and works in a terminal. The preset now uses
-  `$HOME/.local/bin/herdr-attention`, which is what command-argument expansion was added for.
-  The daemon's environment cannot be read from the sandbox ([PID namespace](../../okf/practices/claude-code-sandbox.md#gotchas-troubleshooting-order)),
-  so the new `exit code` line in `status()` is what will actually settle it.
+  the symlink is there and works in a terminal. Providers now address their own scripts
+  through `$PROVIDER_DIR`, which is what command-argument expansion was added for and which
+  removes the question entirely. The daemon's environment cannot be read from a sandboxed
+  session (its own PID namespace), so the `exit code` line in `status()` is what would
+  actually settle it.
 - **`StandardPaths.writableLocation` returns a URL, and `FolderListModel` answers a malformed
   one by scanning the working directory (first run, 2026-08-15).** `"file://" + <url>` gave
   `file://file:///home/…`; the model raised nothing, fell back to the process CWD, and the
@@ -414,7 +441,7 @@ nothing about bindings, missing properties, or whether `Instantiator` does what 
 - Whether Thunderbird's **calendar reminders** use the same app id and a third summary
   shape. None appeared in the 50-entry sample.
 - ~~The widget has never been observed rendering~~ — **confirmed working 2026-08-11.**
-  Both halves of the plugin are now verified end to end on `mkDell`: Thunderbird counting
+  Both halves of the plugin are now verified end to end on real hardware: Thunderbird counting
   per account and clearing on focus, herdr badging `●`/`✓` and clearing itself, and the bar
   widget rendering both.
 - ~~Whether `done` is observable long enough to badge~~ — **settled 2026-08-11, it is.**
@@ -439,7 +466,7 @@ nothing about bindings, missing properties, or whether `Instantiator` does what 
   (as opposed to `reload`, which only re-parses what was already read) and is both the
   workaround and half the diagnosis — if rescan fixes it, the folder model resolved late.
 - ~~Nothing in this rewrite has been loaded in a running shell~~ — **both provider kinds
-  verified end to end on `mkDell`, 2026-08-15.** `FolderListModel` in a plugin and both
+  verified end to end in a running shell, 2026-08-15.** `FolderListModel` in a plugin and both
   `Instantiator` blocks work. Measured:
   - **`command` / `state`**: `1 agents [done=1] → ✓ extensions · 1 · claude`, then
     `1 agents [idle=1] → 0 buckets` once the pane was viewed. Note what the histogram bought:
