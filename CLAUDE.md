@@ -304,6 +304,50 @@ addresses.
 GitHub URL that `dms plugins install` clones, and `validate_links.py` fetches both that repo
 and the screenshot, so neither network check can pass before the flip.
 
+## Branches and publishing (2026-08-16)
+
+`main` + `develop`, the same model as the other public repos here. What makes it *matter* for
+a registry plugin, rather than being bookkeeping:
+
+**`main` is the published artifact.** There is no build step and no upload — DMS clones the
+repo and `git pull`s the **default branch**, so every commit that reaches `main` is live for
+every user on their next `dms plugins update`. Read out of the source rather than assumed:
+`core/internal/plugins/manager.go` clones, `Pull`s, and pins each plugin by commit in a
+lockfile (`LockedPlugin{Repo, Path, Commit}` in `lockfile.go`).
+
+Two consequences that are easy to get wrong:
+
+- **Never make `develop` the GitHub default branch.** `thunderbird_send_as` has its remote
+  HEAD pointing at `develop`, which is harmless for a repo people clone by hand and would
+  mean *shipping unreleased code to everyone* here.
+- **Tags are documentation, not a release channel.** The "latest tag, using default branch"
+  strings in the `dms` binary belong to DMS's **self**-update, not to the plugin path — so a
+  tag changes nothing about what users receive. Tag anyway, so a version in a bug report can
+  be resolved to a tree; just do not expect it to gate anything.
+
+Release procedure, minus the steps that only apply to repos producing build artifacts:
+
+1. All work is committed on `develop`, which already carries the next version `X`.
+2. `git checkout main` then `git merge --no-ff develop -m "Release vX (merge develop)"` —
+   always `--no-ff`; the merge commit *is* the release.
+3. Tag that merge commit `vX`.
+4. **No build step** — the QML *is* the artifact, so there is nothing to package and no
+   version decoration to apply. `./scripts/test` is the gate instead, and it must be green on
+   `main` before the push, because the push is the publication.
+5. Bump the patch on `develop` (`X` → `X+1`), commit `chore: bump to X+1`.
+
+Pushing is manual and is the moment it goes live: `git push`, `git push --tags`. Nothing
+reaches users before that, so everything above is reversible.
+
+**Version history so far:** 1.0.0 was the registry merge; 1.1.0 (`scripts/providers`) was
+pushed straight to `main` before this model was adopted and is tagged retroactively. `develop`
+now carries 1.1.1.
+
+The **providers** follow the same two-branch model in their own repos, with no version to
+bump — for them "published" means merged to `main`, since `scripts/providers update`
+fast-forwards a user's clone to whatever `main` holds. Their deployed clone is also the
+working copy, so those clones sit on `develop`.
+
 ## The provider framework (2026-08-15)
 
 The reframe to preserve: **the plugin is a host, not a bundle of two
