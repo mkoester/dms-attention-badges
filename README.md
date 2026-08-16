@@ -246,6 +246,11 @@ From the plugin registry:
 dms plugins install attentionBadges
 ```
 
+Updates come the same way — `dms plugins update attentionBadges`, or `-a` for every plugin.
+**Both install and update need a `dms restart` afterwards**: the plugin directory watcher is
+set up when the shell starts, so a freshly installed or updated plugin is not picked up until
+then. (Provider files are a different mechanism and need no restart — see above.)
+
 Or from a checkout, which is what you want while writing providers — the plugin directory
 may be a symlink:
 
