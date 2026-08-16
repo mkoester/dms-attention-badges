@@ -60,6 +60,32 @@ Two exist so far, and they are the worked examples of each kind:
 the test for whether something belongs here at all, worked examples of each kind, the
 anti-patterns, and what the format still cannot express.
 
+### Keeping providers up to date
+
+Providers are ordinary git clones, so nothing updates them on its own — the same as plugins,
+which DMS also updates only when asked (`dms plugins update attentionBadges`). The plugin
+ships a script for the whole directory at once:
+
+```sh
+~/.config/DankMaterialShell/plugins/attentionBadges/scripts/providers update
+```
+
+```
+  herdr            ✓ up to date
+  thunderbird      ↑ 3 commits -> updated
+  my-notes         – not a git repo, skipped
+2 checked, 1 updated.
+```
+
+It fast-forwards each provider clone and **never** merges or rebases: a provider you have
+edited locally is reported and left alone, and the run exits non-zero so it can sit inside a
+larger update routine. A flat `*.json` provider has no repo behind it and is only counted.
+Provider files are watched, so an updated `provider.json` takes effect without a restart —
+`dms ipc call attentionBadges status` confirms it.
+
+`scripts/providers install <git-url> [directory-name]` is the clone above with the directory
+and the follow-up `rescan` filled in.
+
 A **single flat `*.json` file** directly in that directory also works, for a provider that
 needs no scripts of its own. The subdirectory form is looked for at the fixed name
 `provider.json`, so a repo's `README.md`, `package.json` or fixtures can never be mistaken for

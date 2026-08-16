@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Install and update the provider repos this plugin watches.
+#
+# A provider is a directory under the scan directory carrying provider.json.
+# The normal install is one git clone per provider, and the deployed clone IS
+# the working copy — there is no second checkout anywhere — so "update" is a
+# fast-forward pull of each of those directories.
+#
+# Deliberately generic: this script names no provider. It also never touches a
+# provider it cannot fast-forward, and never deletes anything.
+#
+#   scripts/providers update              # pull every provider clone
+#   scripts/providers install <url> [dir] # clone one into the scan directory
+#
+# Exit status is 1 if any provider could not be updated, so it is usable from a
+# larger update routine.
+
+set -u
+
+PROVIDERS_DIR="${DMS_ATTENTION_PROVIDERS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/attention-providers}"
+
+usage() {
+    cat <<EOF
+usage: providers update
+       providers install <git-url> [directory-name]
+
+Scan directory: $PROVIDERS_DIR
+(override with \$DMS_ATTENTION_PROVIDERS_DIR)
+EOF
+}
+
+# Report one provider as "  <name>  <message>", padded so the messages line up.
+say() {
+    printf '  %-16s %s\n' "$1" "$2"
+}
+
+cmd_update() {
+    if [ ! -d "$PROVIDERS_DIR" ]; then
+        echo "No provider directory at $PROVIDERS_DIR — nothing to update."
+        return 0
+    fi
+
+    checked=0
+    updated=0
+    failed=0
+
+    for dir in "$PROVIDERS_DIR"/*/; do
+        [ -d "$dir" ] || continue                  # no subdirectories at all
+        name=$(basename "$dir")
+
+        # A directory without provider.json is not a provider, and saying so for
+        # every unrelated directory would be noise rather than information.
+        [ -f "$dir/provider.json" ] || continue
+        checked=$((checked + 1))
+
+        if [ ! -d "$dir/.git" ]; then
+            say "$name" "– not a git repo, skipped"
+            continue
+        fi
+
+        if ! git -C "$dir" fetch --quiet 2>/dev/null; then
+            say "$name" "! fetch failed — skipped"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        upstream=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+        if [ -z "$upstream" ]; then
+            say "$name" "– no upstream branch, skipped"
+            continue
+        fi
+
+        behind=$(git -C "$dir" rev-list --count "HEAD..$upstream" 2>/dev/null)
+        [ -n "$behind" ] || behind=0
+
+        if [ "$behind" -eq 0 ]; then
+            say "$name" "✓ up to date"
+            continue
+        fi
+
+        commits="commits"
+        [ "$behind" -eq 1 ] && commits="commit"
+
+        # --ff-only on purpose: a provider you have edited locally must not be
+        # merged or rebased behind your back. Refusing is the correct outcome.
+        if git -C "$dir" merge --ff-only --quiet "$upstream" 2>/dev/null; then
+            say "$name" "↑ $behind $commits -> updated"
+            updated=$((updated + 1))
+        else
+            say "$name" "! $behind $commits behind, but not a fast-forward — skipped"
+            failed=$((failed + 1))
+        fi
+    done
+
+    # Flat *.json providers are hand-written files with no repo behind them.
+    flat=0
+    for file in "$PROVIDERS_DIR"/*.json; do
+        [ -f "$file" ] || continue
+        flat=$((flat + 1))
+    done
+
+    if [ "$checked" -eq 0 ] && [ "$flat" -eq 0 ]; then
+        echo "No providers found in $PROVIDERS_DIR."
+        return 0
+    fi
+
+    summary="$checked checked, $updated updated"
+    [ "$flat" -gt 0 ] && summary="$summary ($flat flat file(s), nothing to pull)"
+    [ "$failed" -gt 0 ] && summary="$summary, $failed failed"
+    echo "$summary."
+
+    # Provider files are read with watchChanges, so an updated provider.json is
+    # picked up on its own — verify rather than restart. A *new* clone is the
+    # case that needs a rescan, and that is install's message, not this one.
+    if [ "$updated" -gt 0 ]; then
+        echo "Verify: dms ipc call attentionBadges status"
+    fi
+
+    [ "$failed" -eq 0 ]
+}
+
+cmd_install() {
+    url=${1:-}
+    if [ -z "$url" ]; then
+        usage
+        return 2
+    fi
+
+    # Default to the repo name; the directory name is free, since a provider's
+    # identity comes from "id" inside provider.json.
+    name=${2:-}
+    if [ -z "$name" ]; then
+        name=$(basename "$url")
+        name=${name%.git}
+    fi
+
+    target="$PROVIDERS_DIR/$name"
+    if [ -e "$target" ]; then
+        echo "Already exists: $target" >&2
+        return 1
+    fi
+
+    mkdir -p "$PROVIDERS_DIR" || return 1
+    git clone --quiet "$url" "$target" || return 1
+
+    if [ ! -f "$target/provider.json" ]; then
+        echo "Cloned, but $name has no provider.json — it will not be loaded as a provider." >&2
+        return 1
+    fi
+
+    echo "Installed $name."
+    # The folder model resolves at startup, so a directory that appeared after it
+    # is the one case that genuinely needs the scan re-run.
+    echo "Run: dms ipc call attentionBadges rescan"
+}
+
+case "${1:-}" in
+    update) shift; cmd_update "$@" ;;
+    install) shift; cmd_install "$@" ;;
+    -h|--help|help) usage ;;
+    "") usage; exit 2 ;;
+    *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac

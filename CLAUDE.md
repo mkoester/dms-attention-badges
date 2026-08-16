@@ -365,6 +365,33 @@ phrasing, the connection-error notification, and summaries that merely contain t
 because that regex matches a **localized UI string** and fails silently, dumping every mail
 into `other`.
 
+### Updating providers is the user's problem, and `scripts/providers` is the answer (2026-08-16)
+
+Once the plugin shipped through the registry, "how does a stranger update the providers they
+cloned?" had no answer — `dms plugins update` covers the plugin and knows nothing about the
+scan directory. `scripts/providers update` fast-forwards every provider clone; `install`
+clones one and prints the `rescan`. Three decisions worth not re-litigating:
+
+- **Manual, not a timer or a daemon job.** DMS updates plugins only when asked
+  (`dms plugins update [-a] [--check]`), so an auto-pulling provider would be *more*
+  automatic than the host it plugs into, and it would put network fetches inside the shell.
+- **`--ff-only`, always.** The deployed clone *is* the working copy (§ The split), so a
+  provider someone has edited must be reported and left alone rather than merged behind
+  their back. A refusal sets the exit status, which is what makes the script usable from a
+  larger update routine.
+- **It names no provider and no home path**, like the rest of the host: the scan directory
+  comes from `$DMS_ATTENTION_PROVIDERS_DIR` or `$XDG_CONFIG_HOME`, which is also what lets
+  `scripts/test` point it at a throwaway fixture.
+
+**The control run is the part that earned its keep.** The suite went green with `--ff-only`
+deleted from the script — because the fixture's divergence edited `provider.json` on *both*
+sides, so an unrestricted `git merge` hit a conflict and failed for its own unrelated reason.
+The assertion could not distinguish the policy it existed to check from a merge that happened
+to break. Fixed by making the two sides touch **different files**, so git *could* merge them
+cleanly, plus an assertion that the upstream commit did **not** arrive. Same family as the
+`parseProvider.errors` trap above: a check that cannot fail reads exactly like a check that
+passed, and only a deliberately broken copy tells them apart.
+
 ### Traps met building it
 
 - **Publishing only the *enabled* targets to the other surfaces is a trap.** The daemon owns

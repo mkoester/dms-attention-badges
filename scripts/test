@@ -473,5 +473,119 @@ for (const block of blocks) {
     ok(`documented provider ${obj.id} yields a target`, parsed.target !== null);
 }
 
+// ── scripts/providers ───────────────────────────────────────────────────────
+// The updater is exercised end to end against a throwaway providers directory
+// containing one clone that is behind its origin, one that is current, one
+// provider that was copied rather than cloned, a directory that is not a
+// provider at all, and a flat *.json file. Real git repos, because the whole
+// script is git behaviour — a mocked one would only test the mock.
+const cp = require("child_process");
+const os = require("os");
+
+const gitOk = cp.spawnSync("git", ["--version"], { encoding: "utf8" }).status === 0;
+if (!gitOk) {
+    // Loud, and not counted as a pass: a skipped check that reads as green is
+    // the failure mode this repo keeps running into.
+    console.error("SKIP  scripts/providers — git is not available");
+} else {
+    const git = (args, cwd) => cp.spawnSync("git", [
+        "-c", "user.name=test", "-c", "user.email=test@example.com",
+        "-c", "init.defaultBranch=main", ...args
+    ], { cwd, encoding: "utf8" });
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attention-providers-"));
+    const dir = path.join(root, "dir");
+    const origins = path.join(root, "origins");
+    fs.mkdirSync(dir);
+    fs.mkdirSync(origins);
+
+    const seed = (name) => {
+        const origin = path.join(origins, `${name}.git`);
+        const work = path.join(root, `seed-${name}`);
+        git(["init", "-q", "--bare", origin]);
+        git(["clone", "-q", origin, work]);
+        fs.writeFileSync(path.join(work, "provider.json"), `{"id":"${name}"}\n`);
+        git(["add", "provider.json"], work);
+        git(["commit", "-qm", "initial"], work);
+        git(["push", "-q", "origin", "main"], work);
+        git(["clone", "-q", origin, path.join(dir, name)]);
+        return work;
+    };
+
+    const behindWork = seed("behind");
+    seed("current");
+
+    // Move behind's origin on by two commits; the deployed clone stays put.
+    for (const label of ["x", "y"]) {
+        fs.writeFileSync(path.join(behindWork, "provider.json"), `{"id":"behind","label":"${label}"}\n`);
+        git(["commit", "-qam", label], behindWork);
+    }
+    git(["push", "-q", "origin", "main"], behindWork);
+
+    fs.mkdirSync(path.join(dir, "copied"));
+    fs.writeFileSync(path.join(dir, "copied/provider.json"), '{"id":"copied"}\n');
+    fs.mkdirSync(path.join(dir, "notaprovider"));
+    fs.writeFileSync(path.join(dir, "notaprovider/README.md"), "hello\n");
+    fs.writeFileSync(path.join(dir, "flat.json"), '{"id":"flat"}\n');
+
+    const run = (...args) => cp.spawnSync(path.join(__dirname, "providers"), args, {
+        env: Object.assign({}, process.env, { DMS_ATTENTION_PROVIDERS_DIR: dir }),
+        encoding: "utf8"
+    });
+
+    const first = run("update");
+    check("providers update succeeds", first.status, 0);
+    ok("a behind clone is fast-forwarded", /behind\s+↑ 2 commits -> updated/.test(first.stdout));
+    ok("an up-to-date clone says so", /current\s+✓ up to date/.test(first.stdout));
+    ok("a copied provider is skipped, not touched", /copied\s+– not a git repo/.test(first.stdout));
+    ok("a flat provider is counted, not pulled", /1 flat file/.test(first.stdout));
+    // A directory that is not a provider must not be reported at all — every
+    // line this prints is one the reader has to judge.
+    ok("a non-provider directory is silent", !first.stdout.includes("notaprovider"));
+
+    // Running twice must be a no-op: an updater that reports work on every run
+    // is indistinguishable from one that is not working.
+    const second = run("update");
+    check("a second run changes nothing", second.status, 0);
+    ok("...and reports 0 updated", /0 updated/.test(second.stdout));
+
+    // A provider you have edited locally must be refused, never merged or
+    // rebased behind your back — and the refusal must reach the exit status.
+    //
+    // The two sides deliberately touch DIFFERENT files, so git could merge them
+    // cleanly if it were allowed to. An earlier version edited provider.json on
+    // both sides, which conflicts — and a conflicting merge fails for its own
+    // reason, so the test passed with --ff-only removed and proved nothing.
+    fs.writeFileSync(path.join(dir, "behind/notes.md"), "local\n");
+    git(["add", "notes.md"], path.join(dir, "behind"));
+    git(["commit", "-qm", "local edit"], path.join(dir, "behind"));
+    fs.writeFileSync(path.join(behindWork, "provider.json"), '{"id":"behind","label":"z"}\n');
+    git(["commit", "-qam", "z"], behindWork);
+    git(["push", "-q", "origin", "main"], behindWork);
+
+    const diverged = run("update");
+    check("a diverged provider fails the run", diverged.status, 1);
+    ok("...and says why", /not a fast-forward/.test(diverged.stdout));
+    ok("...and leaves the local commit alone",
+        fs.readFileSync(path.join(dir, "behind/notes.md"), "utf8").includes("local"));
+    // The upstream commit must NOT have arrived: without --ff-only git would
+    // have merged these two cleanly, which is exactly what must not happen.
+    ok("...and does not merge the upstream commit in",
+        !fs.readFileSync(path.join(dir, "behind/provider.json"), "utf8").includes('"z"'));
+
+    // install clones into the scan directory and refuses to overwrite.
+    const installed = run("install", path.join(origins, "current.git"), "second");
+    check("install succeeds", installed.status, 0);
+    ok("...and the clone carries provider.json", fs.existsSync(path.join(dir, "second/provider.json")));
+    ok("...and asks for a rescan, which is what a NEW directory needs",
+        /rescan/.test(installed.stdout));
+    check("installing over an existing directory fails",
+        run("install", path.join(origins, "current.git"), "second").status, 1);
+
+    check("no subcommand is a usage error", run().status, 2);
+
+    fs.rmSync(root, { recursive: true, force: true });
+}
+
 console.log(`${ran - failed}/${ran} assertions passed`);
 process.exit(failed === 0 ? 0 : 1);
